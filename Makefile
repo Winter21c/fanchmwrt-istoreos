@@ -108,6 +108,9 @@ fwx_init:
 		echo "reset EXPAND_ROOT to 0 $(CONFIG_TARGET_BOARD)"; \
 	fi; \
 	cp feeds_patches/* feeds/ -fr
+	@# iStoreOS 集成的定点补丁（dockerd / quickstart 菜单序号）。
+	@# 幂等；锚点对不上会显式报错中止，不会静默产出错误固件。
+	$(SCRIPT_DIR)/istoreos-merge.sh
 		
 # check prerequisites before starting to build
 prereq: fwx_init $(target/stamp-prereq) tmp/.prereq_packages

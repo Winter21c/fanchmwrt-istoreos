@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# 与 iStoreOS 一致：把 docker 的数据目录指到 overlay 的 upper 目录。
+#
+# 原因：squashfs 镜像的 / 是 overlayfs，docker 的 overlay2 存储驱动检测到
+# backing filesystem 是 overlay 会直接拒绝启动。/overlay/upper 是底下那个
+# ext4 分区本身，指过去之后 docker 看到的就是 ext4，overlay2 可正常使用。
+# 这正是 iStoreOS 在其 09_istoreos 里做 uci set dockerd.globals.data_root=
+# /overlay/upper/opt/docker 的目的。
+#
+# ext4-combined 镜像没有独立的 /overlay/upper（/ 本身就是 ext4），这种情况
+# 保持 dockerd 的默认值 /opt/docker/ 即可，所以这里加目录存在性判断，
+# 而不是像 iStoreOS 那样无条件设置（他们的 x86 只出 squashfs 镜像）。
+#
+# 排在 dockerd 包自带的 16_ / 17_ 之后、99_docker_nat_fw4 之前。
+#
+[ -d /overlay/upper ] || exit 0
+
+uci -q batch <<-EOF
+	set dockerd.globals.data_root='/overlay/upper/opt/docker'
+	commit dockerd
+EOF
+
+exit 0

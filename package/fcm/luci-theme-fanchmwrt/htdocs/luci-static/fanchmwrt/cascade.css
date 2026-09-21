@@ -1715,6 +1715,15 @@ header {
 	--menu-icon-image: url('icons/default.svg');
 }
 
+/* iStoreOS 集成新增的两个顶级菜单图标 */
+.menu-icon-store:before {
+	--menu-icon-image: url('icons/store.svg');
+}
+
+.menu-icon-quickstart:before {
+	--menu-icon-image: url('icons/quickstart.svg');
+}
+
 .menu-icon-fwx_ac:before {
 	--menu-icon-image: url('icons/fwx_ac.svg');
 }

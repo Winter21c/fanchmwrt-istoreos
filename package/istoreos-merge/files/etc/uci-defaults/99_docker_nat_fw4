@@ -1,0 +1,25 @@
+#!/bin/sh
+#
+# 与 iStoreOS 保持一致：docker 容器所在的 172.16.0.0/12 需要由路由器的
+# fw4 做 MASQUERADE 才能出网。
+#
+# 背景：iStoreOS 的 dockerd 配置默认把 docker 自己的 iptables 关掉
+# （dockerd.globals.iptables=0，见 merge-patches/0001-dockerd-istoreos.patch），
+# 由 17_docker-fw4 建立 docker 防火墙 zone 与 forwarding，但 fw4 的默认
+# nat 规则只覆盖 lan -> wan，不含 docker zone，所以这里补一条。
+#
+# 与 istoreos-files/files/etc/uci-defaults/99_docker_nat_fw4 内容一致。
+#
+uci -q batch <<-EOF
+	set firewall.docker_nat=nat
+	set firewall.docker_nat.name='DockerNAT'
+	set firewall.docker_nat.family='ipv4'
+	set firewall.docker_nat.proto='all'
+	set firewall.docker_nat.src='lan'
+	set firewall.docker_nat.target='MASQUERADE'
+	set firewall.docker_nat.extra='-i docker0'
+	set firewall.docker_nat.src_ip='172.16.0.0/12'
+	commit firewall
+EOF
+
+exit 0

@@ -16,7 +16,9 @@ return baseclass.extend({
 		'fwx_tools': 'fwx_tools',
 		'fwx_games': 'fwx_games',
 		'fwx_cloud_service': 'fwx_cloud_service',
-		'fwx_ac': 'fwx_ac'
+		'fwx_ac': 'fwx_ac',
+		'store': 'store',
+		'quickstart': 'quickstart'
 	},
 	defaultIcon: 'default',
 	__init__() {
@@ -302,9 +304,17 @@ return baseclass.extend({
 		localStorage.setItem('luci-menu-category', category);
 	},
 
+	// 哪些顶级菜单进「普通模式」。
+	//
+	// 原版只认 fwx* —— 那是 fanchmwrt 自己的菜单。本固件另外集成了 iStoreOS
+	// 的 iStore 商店与 QuickStart 面板，它们是这次合并的招牌功能；不放进普通
+	// 模式的话，默认视图里这两个菜单根本看不到（会被归到高级模式）。
 	getMenuCategory(menuName) {
 		const normalizedName = (menuName || '').toLowerCase();
 		if (normalizedName.startsWith('fwx')) {
+			return 'menu-item-basic';
+		}
+		if (normalizedName === 'store' || normalizedName === 'quickstart') {
 			return 'menu-item-basic';
 		}
 		return 'menu-item-advanced';

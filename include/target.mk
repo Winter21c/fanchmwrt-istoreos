@@ -149,6 +149,36 @@ endif
 DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 
 ##@
+# @brief iStoreOS 集成包。
+#
+# 只对 x86_64 生效：
+#   * quickstart 后端只有 x86_64 / aarch64 / arm 的预编译二进制，而
+#     luci-app-quickstart 硬依赖它，别的架构选了也编不出来；
+#   * luci-app-dockerman 自身限定 @(aarch64||arm||x86_64)；
+#   * 本固件的目标就是 x86 软路由，其余机型不参与构建。
+#
+# xz-utils 不是可选项：luci-app-store 依赖 tar，而 tar 的 PACKAGE_TAR_XZ
+# （默认 y）会在依赖者身上展开成 `depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils`。
+# 不选 xz-utils 时该约束不可满足，Kconfig 会把 luci-app-store / luci-app-quickstart
+# 连同提示符一起隐藏 —— .config 里连 "# ... is not set" 都不会出现。
+##
+ifneq ($(filter x86_64,$(ARCH)),)
+  DEFAULT_PACKAGES += \
+	luci-app-quickstart \
+	luci-app-store \
+	luci-app-dockerman \
+	luci-app-diskman \
+	luci-app-hd-idle \
+	luci-app-samba4 \
+	luci-app-nfs \
+	luci-app-mergerfs \
+	luci-app-unishare \
+	istoreos-merge \
+	wsdd2 \
+	xz-utils
+endif
+
+##@
 # @brief Filter out packages, prepended with `-`.
 #
 # @param 1: Package list.
