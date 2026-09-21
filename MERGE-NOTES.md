@@ -348,15 +348,92 @@ diskman     c20df1d4f40d86e32fd919f33122b2a48f8a99b4
 
 （`fanchmwrt` feed 本身也记在 `feeds.buildinfo` 里：`75c3c55e1d…`。）
 
-### 9.4 尚未验证的部分
+### 9.4 上游遗留问题
 
-编译、打包、镜像内容都已验证；**真机运行行为未验证**（需要实际刷机或起 QEMU）。
-具体包括：iStore 能否拉到应用列表、QuickStart 面板能否正常渲染、Dockerman 能否
-真正起容器、`fwx` 的 ubus 接口在有真实流量时的表现。这些依赖运行中的 LuCI 与网络，
-建议刷到虚拟机或设备上确认。
+fanchmwrt 的 `DEFAULT_PACKAGES.router` 里列了 `luci-app-fwx-firewall`，
+但 `feeds/fanchmwrt/` 里**没有这个包**。Kconfig 会静默忽略它
+（连 `# ... is not set` 都不写），所以不影响构建，本次也没有去改上游那份清单。
 
-另有一处**上游遗留问题**（非本次引入）：fanchmwrt 的 `DEFAULT_PACKAGES.router`
-里列了 `luci-app-fwx-firewall`，但 `feeds/fanchmwrt/` 里**没有这个包**。
-Kconfig 会静默忽略它（连 `# ... is not set` 都不写），所以不影响构建，
-本次也没有去改上游那份清单。
+---
+
+## 10. QEMU 实机启动验证
+
+固件已在 QEMU/KVM 下**实际启动过**，验证结论如下。
+
+### 10.1 管理地址取决于网口数量（重要）
+
+fanchmwrt 的 `/usr/bin/fwx_cli.sh` 里有个 `check_and_init_network()`：
+**如果没有 WAN 接口（`network.wan.proto` 为空），它会把 LAN 切成 DHCP
+并进入旁路模式**：
+
+```sh
+wan_proto=$(uci get network.wan.proto 2>/dev/null)
+if [ -z "$wan_proto" ]; then
+    uci set network.lan.proto=dhcp
+    uci set fwx.network.work_mode=1      # 1 = 旁路模式
+    ...
+fi
+```
+
+而 WAN 是由 `target/linux/x86/base-files/etc/board.d/03-default-network` 按网口
+数量创建的。实测两种情况：
+
+| 网口数 | 工作模式 | `br-lan` | 管理地址 |
+|---|---|---|---|
+| **≥ 2**（真实软路由典型） | **Gateway Mode** | **192.168.1.1/24 静态** | **http://192.168.1.1** |
+| 1 | Bypass Mode | DHCP 客户端 | 由上游路由器分配，需查上游 DHCP 租约 |
+
+单网口情况下要改回静态，可以用串口/VGA 上的 fanchmwrt 控制台菜单
+`[2] Set LAN(br-lan) Static IP`。
+
+### 10.2 登录凭据
+
+fanchmwrt 在 `package/base-files/files/etc/shadow` 里预置了 root 密码，
+哈希为 `$5$dp/4vCQAseJ6gAD6$j0Q…`，对应明文是 **`password`**。
+（已验证：`openssl passwd -5 -salt dp/4vCQAseJ6gAD6 password` 与该哈希逐字节相同。）
+`dropbear` 的 `PasswordAuth` / `RootPasswordAuth` 均为 `on`。
+**建议首次登录后立刻改掉。**
+
+### 10.3 Web 服务
+
+```
+uhttpd.main.listen_http  = 0.0.0.0:80  [::]:80
+uhttpd.main.listen_https = 0.0.0.0:443 [::]:443   （自签证书）
+uhttpd.main.redirect_https = 0                     （不强制跳 HTTPS）
+```
+
+未登录访问 `/cgi-bin/luci/` 返回 **403 + `x-luci-login-required: yes` + 登录页 HTML**
+—— 这是 LuCI 的正常行为（浏览器 JS 会据此渲染登录框），不是故障。
+
+返回的登录页里引用的是：
+
+```html
+<link rel="stylesheet" href="/luci-static/fanchmwrt/cascade.css?v=26.264.03002~afc4d28">
+```
+
+**证明默认主题确实是 `luci-theme-fanchmwrt`。**
+
+### 10.4 Docker 运行时
+
+```
+Server Version: 27.3.1
+Storage Driver: overlay2          ← 关键
+Docker Root Dir: /overlay/upper/opt/docker
+Cgroup Driver: cgroupfs   Cgroup Version: 2
+```
+
+存储驱动是 `overlay2` 而不是退化成 `vfs`，说明 `package/istoreos-merge` 里的
+`20_docker_data_root` 起作用了：squashfs 镜像的 `/` 是 overlayfs，docker 的
+overlay2 驱动会拒绝在 overlay 上工作；把数据目录指到 `/overlay/upper`（底下的
+ext4 分区本身）之后才正常。`docker0` 也在启动后自动出现（172.17.0.1）。
+
+`dockerd` / `quickstart` / `istore` / `fwx` 四个服务启动后均为 enabled。
+
+### 10.5 仍未验证的部分
+
+`fwx` 的 DPI/应用识别要有**真实流量**才有意义，QEMU 的用户态网络测不出来；
+iStore 能否真正拉到应用列表依赖外网到 linkease 仓库的连通性；
+Dockerman 的 Web 界面只验证到后端 RPC 与 daemon 正常，没有实际拉起容器。
+这些建议刷到真实设备或带桥接网络的虚拟机里再确认。
+
 
