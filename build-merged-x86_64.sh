@@ -43,32 +43,51 @@ fi
 echo "==> 应用 iStoreOS 集成补丁"
 ./scripts/istoreos-merge.sh
 
-# --- 3. 配置 ----------------------------------------------------------------
+# --- 3. 构建参数 ------------------------------------------------------------
+# 把 LAN_IP / ROOTFS_PARTSIZE / ENABLE_DOCKER 落成树里的具体改动
+# （.build-options + 一个 uci-defaults）。不传则全部用默认值，
+# 也就是和之前完全一样的行为。
+echo "==> 应用构建参数"
+./scripts/apply-build-options.sh
+
+# 分区大小以脚本解析后的值为准（它已经做过范围校验）。
+PART_SIZE="$(sed -n 's/^FANCHMWRT_ROOTFS_PARTSIZE=//p' .build-options 2>/dev/null | head -1)"
+[ -n "$PART_SIZE" ] || PART_SIZE=1024
+
+# --- 4. 配置 ----------------------------------------------------------------
 # 只给目标与 rootfs 大小，其余（fanchmwrt 的 fwx 全家桶 + iStoreOS 的
 # 面板/Docker/iStore + 磁盘与共享套件）都由 include/target.mk 的
 # DEFAULT_PACKAGES 推导出来。
 if [ ! -f .config ]; then
 	echo "==> 生成 .config"
-	cat > .config <<-'EOF'
-		CONFIG_TARGET_x86=y
-		CONFIG_TARGET_x86_64=y
-		CONFIG_TARGET_x86_64_DEVICE_generic=y
-		CONFIG_TARGET_ROOTFS_PARTSIZE=1024
-	EOF
+	cat > .config <<EOF
+CONFIG_TARGET_x86=y
+CONFIG_TARGET_x86_64=y
+CONFIG_TARGET_x86_64_DEVICE_generic=y
+CONFIG_TARGET_ROOTFS_PARTSIZE=$PART_SIZE
+EOF
 	make defconfig
 fi
 
 # 集成要是没活过依赖解析，就在这里失败，而不是编出一个缺东西的固件。
 MUST_HAVE="luci-theme-fanchmwrt luci-app-fwx-dashboard \
            luci-app-quickstart quickstart luci-app-store \
-           luci-app-dockerman dockerd docker docker-compose \
            luci-app-diskman luci-app-mosdns mosdns luci-app-ttyd ttyd \
            luci-app-nfs luci-app-mergerfs luci-app-unishare \
-           istoreos-merge wsdd2 xz-utils uhttpd samba4-server"
+           build-defaults wsdd2 xz-utils uhttpd samba4-server"
+
+# 关掉 Docker 时这些必须不在；开着的时候下面再补进 MUST_HAVE。
+DOCKER_PKGS="luci-app-dockerman dockerd docker docker-compose istoreos-merge"
+DOCKER_ON="$(sed -n 's/^FANCHMWRT_ENABLE_DOCKER=//p' .build-options 2>/dev/null | head -1)"
+if [ "$DOCKER_ON" = "1" ]; then
+	MUST_HAVE="$MUST_HAVE $DOCKER_PKGS"
+else
+	MUST_NOT_HAVE="$MUST_NOT_HAVE $DOCKER_PKGS"
+fi
 
 # 这些是本项目明确不要的（见 include/target.mk 的移除块）。
 MUST_NOT_HAVE="luci-app-ddns luci-app-hd-idle luci-app-samba4 \
-               luci-app-uhttpd luci-app-upnp luci-app-wol"
+               luci-app-uhttpd luci-app-upnp luci-app-wol $MUST_NOT_HAVE"
 
 MISSING=""
 for pkg in $MUST_HAVE; do
@@ -99,7 +118,7 @@ if [ -n "$SKIP_BUILD" ]; then
 	exit 0
 fi
 
-# --- 4. 构建 ----------------------------------------------------------------
+# --- 5. 构建 ----------------------------------------------------------------
 echo "==> 下载源码"
 make -j"$JOBS" download || echo "WARNING: 部分下载失败，make 会重试"
 

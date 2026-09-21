@@ -4,6 +4,9 @@
 
 - **构建版本**：`@VERSION@`
 - **构建日期**：@DATE@
+- **管理地址**：`@LANIP@`
+- **rootfs 分区**：@ROOTSIZE@ MB
+- **Docker**：@DOCKER@
 - **已安装软件包**：@PKGCOUNT@ 个
 - **自动校验**：构建流水线里 `scripts/verify-merged-firmware.sh` 全部通过
 
@@ -13,7 +16,7 @@
 
 | | |
 |---|---|
-| 🌐 **管理地址** | **<http://192.168.1.1>** |
+| 🌐 **管理地址** | **http://@LANIP@** |
 | 👤 **用户名** | `root` |
 | 🔑 **密码** | `password` |
 

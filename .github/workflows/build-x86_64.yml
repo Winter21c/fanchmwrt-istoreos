@@ -12,6 +12,24 @@ name: 构建 x86_64 固件
 on:
   workflow_dispatch:
     inputs:
+      lan_ip:
+        description: '管理地址（LAN IP），可带前缀长度。多网口机器生效'
+        type: string
+        default: '192.168.1.1'
+      rootfs_size:
+        description: 'rootfs 分区大小（MB）'
+        type: choice
+        options:
+          - '512'
+          - '1024'
+          - '2048'
+          - '4096'
+          - '8192'
+        default: '1024'
+      enable_docker:
+        description: '包含 Docker（dockerd + docker-compose + Dockerman 界面）'
+        type: boolean
+        default: true
       create_release:
         description: '构建成功后创建 Release'
         type: boolean
@@ -50,6 +68,18 @@ jobs:
       # 慢镜像保护：scripts/download.pl 会把 CURL_OPTIONS 拼进每一次 curl。
       # runner 在境外，但上游仍可能有个别镜像很慢，保留这个下限让它自动换源。
       CURL_OPTIONS: --speed-limit 51200 --speed-time 60
+
+      # ---- 构建参数 --------------------------------------------------------
+      # 由 scripts/apply-build-options.sh 消费，落成源码树里的改动。
+      #
+      # 注意：这里**不能**写成 `${{ inputs.x || 'default' }}`。
+      # 对 boolean 输入，false 在 GitHub 表达式里是「假值」，`false || '1'`
+      # 会得到 '1' —— 也就是说用户勾掉了 Docker，却仍然编进固件。
+      # 所以直接传输入原值：push 触发时 inputs 为空字符串，
+      # 由脚本自己判定「空 = 用默认」，语义单一且不会踩这个坑。
+      LAN_IP: ${{ inputs.lan_ip }}
+      ROOTFS_PARTSIZE: ${{ inputs.rootfs_size }}
+      ENABLE_DOCKER: ${{ inputs.enable_docker }}
 
     steps:
       # ---------------------------------------------------------------------
@@ -140,16 +170,32 @@ jobs:
           MANIFEST=$(ls -1 bin/targets/x86/64/*.manifest | head -1)
           PKGCOUNT=$(wc -l < "$MANIFEST")
           VERSION=$(cat bin/targets/x86/64/version.buildinfo 2>/dev/null || echo unknown)
+
+          # 以脚本解析后的 .build-options 为准，而不是 inputs ——
+          # 这样日志里显示的是真正生效的值（例如空输入被填成默认值）。
+          OPT_DOCKER=$(sed -n 's/^FANCHMWRT_ENABLE_DOCKER=//p' .build-options)
+          OPT_LANIP=$(sed -n 's/^FANCHMWRT_LAN_IP=//p' .build-options)
+          OPT_SIZE=$(sed -n 's/^FANCHMWRT_ROOTFS_PARTSIZE=//p' .build-options)
+          [ "$OPT_DOCKER" = "1" ] && OPT_DOCKER_TXT="包含" || OPT_DOCKER_TXT="不含"
+          [ -n "$OPT_LANIP" ] || OPT_LANIP="192.168.1.1（FanchmWrt 默认）"
+
           {
             echo "pkgcount=$PKGCOUNT"
             echo "version=$VERSION"
+            echo "opt_lanip=$OPT_LANIP"
+            echo "opt_size=$OPT_SIZE"
+            echo "opt_docker=$OPT_DOCKER_TXT"
           } >> "$GITHUB_OUTPUT"
+
           {
             echo "### 构建成功"
             echo ""
             echo "| 项目 | 值 |"
             echo "|---|---|"
             echo "| 版本 | \`$VERSION\` |"
+            echo "| 管理地址 | \`$OPT_LANIP\` |"
+            echo "| rootfs 分区 | ${OPT_SIZE} MB |"
+            echo "| Docker | $OPT_DOCKER_TXT |"
             echo "| 已安装软件包 | $PKGCOUNT 个 |"
             echo "| 核验 | 全部通过 |"
             echo ""
@@ -204,10 +250,16 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           PKGCOUNT: ${{ steps.summary.outputs.pkgcount }}
           VERSION: ${{ steps.summary.outputs.version }}
+          OPT_LANIP: ${{ steps.summary.outputs.opt_lanip }}
+          OPT_SIZE: ${{ steps.summary.outputs.opt_size }}
+          OPT_DOCKER: ${{ steps.summary.outputs.opt_docker }}
         run: |
           sed -e "s/@TAG@/${TAG}/g" \
               -e "s/@VERSION@/${VERSION}/g" \
               -e "s/@PKGCOUNT@/${PKGCOUNT}/g" \
+              -e "s/@LANIP@/${OPT_LANIP}/g" \
+              -e "s/@ROOTSIZE@/${OPT_SIZE}/g" \
+              -e "s/@DOCKER@/${OPT_DOCKER}/g" \
               -e "s/@DATE@/$(date -u +%Y-%m-%d)/g" \
               .github/release-notes.md > /tmp/release-notes.md
           echo "=== Release 说明预览 ==="

@@ -39,3 +39,7 @@ git-src
 # fanchmwrt 的 fwx_init 每次 make 都会按目标平台重新生成这个文件
 # （删掉 EXPAND_ROOT= 行再追加），是构建产物而不是源文件。
 /package/base-files/files/etc/product_feature
+
+# scripts/apply-build-options.sh 的生成物
+/.build-options
+/package/build-defaults/files/

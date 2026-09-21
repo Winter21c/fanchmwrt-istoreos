@@ -149,6 +149,20 @@ endif
 DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 
 ##@
+# @brief 可选的构建参数。
+#
+# scripts/apply-build-options.sh 会按构建者选的参数生成 .build-options，
+# 这里读进来。文件不存在（比如直接 make menuconfig）时用下面的默认值。
+#
+# 目前只有一个开关：
+#   FANCHMWRT_ENABLE_DOCKER  1 = 含 Docker，0 = 不含
+##
+ifdef TOPDIR
+-include $(TOPDIR)/.build-options
+endif
+FANCHMWRT_ENABLE_DOCKER ?= 1
+
+##@
 # @brief 本项目额外选中的包（仅 x86_64）。
 #
 # 只对 x86_64 生效：
@@ -165,14 +179,15 @@ DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 # luci-app-fwx-app-center 是 fwx 全家桶里唯一没被 DEFAULT_PACKAGES.router 收录的
 # 成员（上游只把它当可选包），这里显式补上；纯 LuCI Lua 应用，无额外构建依赖。
 #
-# luci-app-ttyd 只是给 ttyd 加菜单入口 —— ttyd 二进制本来就作为
-# luci-app-dockerman 的依赖存在于固件里，所以这个几乎不增加体积。
+# luci-app-ttyd 自带 +ttyd 依赖，所以它与 Docker 开关无关，关掉 Docker 后
+# Web 终端照常可用。
+#
+# build-defaults 承载构建时选定的默认值（管理地址、参数记录），必须始终存在。
 ##
 ifneq ($(filter x86_64,$(ARCH)),)
   DEFAULT_PACKAGES += \
 	luci-app-quickstart \
 	luci-app-store \
-	luci-app-dockerman \
 	luci-app-diskman \
 	luci-app-mosdns \
 	luci-app-ttyd \
@@ -180,9 +195,18 @@ ifneq ($(filter x86_64,$(ARCH)),)
 	luci-app-mergerfs \
 	luci-app-unishare \
 	luci-app-fwx-app-center \
-	istoreos-merge \
+	build-defaults \
 	wsdd2 \
 	xz-utils
+
+  # Docker 是可选项：dockerd 自带 containerd/runc/tini，docker-compose
+  # 依赖 docker，istoreos-merge 只是 docker 的 fw4 NAT 与 data_root 配置，
+  # 所以去掉 luci-app-dockerman 这一条，整条链都会跟着消失。
+  ifeq ($(FANCHMWRT_ENABLE_DOCKER),1)
+    DEFAULT_PACKAGES += \
+	luci-app-dockerman \
+	istoreos-merge
+  endif
 endif
 
 ##@

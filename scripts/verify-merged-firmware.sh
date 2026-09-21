@@ -29,6 +29,12 @@ ROOTFS="$(ls -1 "$OUT"/*rootfs.tar.gz 2>/dev/null | head -1)"
 [ -n "$MANIFEST" ] || { echo "找不到 .manifest" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# 读取构建参数：Docker 是可选项，它开着和关着要核验的东西正好相反。
+# 文件不存在（比如直接拿别人给的 manifest 来验）时按「含 Docker」处理。
+DOCKER_ON="$(sed -n 's/^FANCHMWRT_ENABLE_DOCKER=//p' "$TOPDIR/.build-options" 2>/dev/null | head -1)"
+[ -n "$DOCKER_ON" ] || DOCKER_ON=1
+
+# ---------------------------------------------------------------------------
 head_ "包清单（$(basename "$MANIFEST")）"
 
 # pkg_installed <包名>
@@ -50,7 +56,7 @@ check_pkg() {
 	fi
 }
 
-for p in base-files busybox firewall4 dnsmasq-full \
+MUST_HAVE_PKGS="base-files busybox firewall4 dnsmasq-full \
          luci-base luci-compat luci-lua-runtime \
          luci-theme-fanchmwrt \
          fwxd kmod-fwx libfwx_common \
@@ -63,14 +69,21 @@ for p in base-files busybox firewall4 dnsmasq-full \
          luci-app-fwx-dashboard-setting luci-app-fwx-app-center \
          luci-app-quickstart quickstart \
          luci-app-store taskd luci-lib-taskd luci-lib-xterm \
-         luci-app-dockerman dockerd docker docker-compose \
          luci-app-mosdns mosdns geo2txt \
          luci-app-ttyd ttyd \
-         istoreos-merge \
+         build-defaults \
          luci-app-diskman luci-app-nfs \
          luci-app-mergerfs luci-app-unishare mergerfs unishare webdav2 wsdd2 \
          xz-utils \
-         uhttpd uhttpd-mod-ubus samba4-server ; do
+         uhttpd uhttpd-mod-ubus samba4-server"
+
+DOCKER_PKGS="luci-app-dockerman dockerd docker docker-compose containerd runc istoreos-merge"
+
+if [ "$DOCKER_ON" = "1" ]; then
+	MUST_HAVE_PKGS="$MUST_HAVE_PKGS $DOCKER_PKGS"
+fi
+
+for p in $MUST_HAVE_PKGS; do
 	check_pkg "$p"
 done
 
@@ -92,6 +105,19 @@ check_absent luci-app-wol    "本项目不需要网络唤醒"
 check_absent luci-app-upnp   "本项目不需要 UPnP"
 check_absent luci-app-uhttpd "只需要 uhttpd 本体，不需要它的配置界面"
 check_absent luci-app-samba4 "只需要 samba4-server（unishare 依赖），不需要它的配置界面"
+
+# Docker 是可选项：这次构建把它关掉了，就反过来确认整条链都不在。
+if [ "$DOCKER_ON" != "1" ]; then
+	for p in $DOCKER_PKGS; do
+		check_absent "$p" "本次构建选择了不含 Docker"
+	done
+	# 关掉 Docker 不该影响 Web 终端：luci-app-ttyd 自带 +ttyd 依赖。
+	if pkg_installed ttyd && pkg_installed luci-app-ttyd; then
+		ok "ttyd 未受 Docker 关闭影响（luci-app-ttyd 自带 +ttyd 依赖）"
+	else
+		bad "关闭 Docker 后 ttyd 被误删 —— luci-app-ttyd 会缺依赖"
+	fi
+fi
 
 # 顺带确认这两个"界面没了但本体还在"的包没有被连带删掉。
 if pkg_installed uhttpd; then
@@ -182,6 +208,7 @@ else
 	f /www/luci-static/quickstart/index.js              "面板前端"
 	g /usr/share/luci/menu.d/luci-app-quickstart.json '"order": 2' "菜单序号已让位到 2（首页留给仪表盘）"
 
+	if [ "$DOCKER_ON" = "1" ]; then
 	head_ "iStoreOS 侧：Docker"
 	f /usr/bin/dockerd                                  "dockerd"
 	f /usr/bin/docker                                   "docker cli"
@@ -198,6 +225,19 @@ else
 	f /usr/share/luci/menu.d/luci-app-dockerman.json    "Dockerman 菜单"
 	f /usr/share/rpcd/ucode/docker_rpc.uc               "Dockerman RPC 后端"
 	f /www/luci-static/resources/view/dockerman/overview.js "Dockerman 概览页"
+	else
+	head_ "iStoreOS 侧：Docker（本次构建已关闭）"
+	if [ -e "$R/usr/bin/dockerd" ] || [ -e "$R/etc/init.d/dockerd" ]; then
+		bad "Docker 已关闭，但固件里仍有 dockerd"
+	else
+		ok "Docker 相关文件确认未打包"
+	fi
+	if [ -e "$R/etc/uci-defaults/99_docker_nat_fw4" ] || [ -e "$R/etc/uci-defaults/20_docker_data_root" ]; then
+		bad "Docker 已关闭，但 istoreos-merge 的 uci-defaults 仍在"
+	else
+		ok "istoreos-merge 的 uci-defaults 确认未打包"
+	fi
+	fi
 
 	head_ "iStoreOS 侧：iStore 商店"
 	f /usr/lib/lua/luci/controller/store.lua            "iStore controller"
@@ -233,6 +273,23 @@ else
 	f /usr/bin/ttyd                                      "ttyd 终端"
 	f /etc/init.d/ttyd                                   "ttyd 服务"
 	f /usr/share/luci/menu.d/luci-app-ttyd.json          "luci-app-ttyd 菜单"
+
+	head_ "构建参数（build-defaults）"
+	f /etc/build-options                                 "构建参数记录 /etc/build-options"
+	BUILD_LAN_IP="$(sed -n 's/^FANCHMWRT_LAN_IP=//p' "$TOPDIR/.build-options" 2>/dev/null | head -1)"
+	if [ -n "$BUILD_LAN_IP" ]; then
+		if [ -f "$R/etc/uci-defaults/25_lan_ip" ]; then
+			ok "管理地址 uci-defaults 已打包（$BUILD_LAN_IP）"
+			# 必须用 add_list：config_generate 生成的是 list，
+			# 写成标量会同时留下新旧两个地址。
+			g /etc/uci-defaults/25_lan_ip "add_list network.lan.ipaddr=" "用 add_list 写入（与 config_generate 的 list 形式一致）"
+			g /etc/uci-defaults/25_lan_ip "$BUILD_LAN_IP" "地址值与构建参数一致"
+		else
+			bad "构建参数里指定了管理地址 $BUILD_LAN_IP，但固件里没有对应的 uci-defaults"
+		fi
+	else
+		skip "本次构建未指定管理地址，按预期没有 25_lan_ip"
+	fi
 
 	head_ "运行时健全性"
 	f /bin/busybox                                       "busybox"

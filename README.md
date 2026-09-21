@@ -147,10 +147,17 @@ FanchmWrt 在没有 **WAN 口** 的时候，会自动把设备切成**旁路模�
 
 1. 打开仓库的 **Actions** 标签页
 2. 左侧选「**构建 x86_64 固件**」
-3. 右边 **Run workflow**，按需勾选：
-   - `create_release` —— 编译完自动创建 Release
-   - `release_tag` —— 指定标签，留空则自动用日期时间
-   - `upload_artifact` —— 把镜像上传成构建产物（Actions 页面可直接下载）
+3. 右边 **Run workflow**，按需填参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `lan_ip` | `192.168.1.1` | **管理地址**。可带前缀长度，如 `10.0.0.1/16` |
+| `rootfs_size` | `1024` | **rootfs 分区大小（MB）**，可选 512 / 1024 / 2048 / 4096 / 8192 |
+| `enable_docker` | ✅ 勾选 | **是否包含 Docker**。不勾会去掉 dockerd + docker-compose + Dockerman 界面，固件小约 60MB |
+| `create_release` | ⬜ | 编译完自动创建 Release |
+| `release_tag` | 留空 | 指定标签，留空则自动用日期时间 |
+| `upload_artifact` | ✅ 勾选 | 把镜像上传成构建产物（Actions 页面可直接下载） |
+
 4. 大约 **2～3 小时**后出结果
 
 **方式二：打个标签就自动发布**
@@ -161,7 +168,18 @@ git push origin v25.12.4-istoreos.3
 ```
 
 推上去之后会自动编译，成功后创建一个同名 Release 并把镜像挂上去 —— 也就是
-本仓库现有那三个 Release 的来法。
+本仓库现有那三个 Release 的来法。（这条路径用的是默认参数：含 Docker、
+192.168.1.1、1GB 分区。）
+
+### 本地也能用同一套参数
+
+工作流只是把参数转成环境变量交给 `scripts/apply-build-options.sh`，
+本地一样可以：
+
+```sh
+LAN_IP=192.168.100.1 ENABLE_DOCKER=0 ROOTFS_PARTSIZE=2048 \
+  ./build-merged-x86_64.sh
+```
 
 ### 流水线做了什么
 
@@ -291,7 +309,8 @@ feeds.conf.default            新增 7 个 feed（iStore 商店、QuickStart、m
                               NFS、DiskMan、mosdns）
 include/target.mk             x86_64 专用包清单 + 「不要哪些包」的移除声明
 merge-patches/                3 个定点补丁（Docker / QuickStart / v2ray-geodata）
-scripts/                      补丁应用脚本 + 产物核验脚本
+scripts/                      补丁应用脚本 + 产物核验脚本 + 构建参数处理
+package/build-defaults/       构建时选定的默认值（管理地址等）
 package/istoreos-merge/       Docker 在 fw4 下的 NAT 规则、squashfs 上的数据目录落点
 package/fcm/luci-theme-fanchmwrt/   新菜单的图标与归类
 .github/                      在线编译工作流（替换掉 OpenWrt 上游的 CI）

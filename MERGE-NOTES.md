@@ -593,3 +593,81 @@ key 只跟 `feeds.conf.default` 走：它变了才说明包来源变了。
 
 跑满 6 小时的极端情况（比如 runner 特别慢、或 Go 包并发下载卡住）会超时失败，
 重跑一次通常就好了。
+
+---
+
+## 12. 可选的构建参数
+
+构建者可以在 GitHub Actions 页面上选三件事：**管理地址**、**rootfs 分区大小**、
+**是否包含 Docker**。本地构建走同一套机制。
+
+### 12.1 机制
+
+`scripts/apply-build-options.sh` 读取三个环境变量，把它们落成源码树里的具体改动：
+
+| 参数 | 落到哪里 |
+|---|---|
+| `LAN_IP` | `package/build-defaults/files/etc/uci-defaults/25_lan_ip` |
+| `ROOTFS_PARTSIZE` | `.config` 的 `CONFIG_TARGET_ROOTFS_PARTSIZE` |
+| `ENABLE_DOCKER` | `.build-options`（make 片段）→ `include/target.mk` |
+
+`include/target.mk` 用 `-include $(TOPDIR)/.build-options` 读回来，Docker 相关的
+包（`luci-app-dockerman` / `istoreos-merge`）改成条件加入。其余包的「不要清单」
+仍然是 `-包名` 语法，两套机制互不干扰。
+
+### 12.2 管理地址为什么用 uci-defaults
+
+`bin/config_generate` 是在**首次启动时**才生成 `/etc/config/network` 的，
+uci-defaults 紧随其后执行、且在 `network` 服务启动之前，所以在这里改既生效，
+又不必去动 base-files 的核心脚本。
+
+一个细节：`config_generate` 生成的是 **list** 形式的 `ipaddr`，
+所以脚本必须先 `delete` 再 `add_list`；直接 `set network.lan.ipaddr=...`
+会同时留下新旧两个地址。核验脚本里有对应的断言盯着这一点。
+
+### 12.3 与 FanchmWrt 旁路模式的相互作用
+
+FanchmWrt 的 `fwx_cli.sh` 在「没有 WAN 口」时会把 LAN 改成 DHCP 进旁路模式。
+查证下来它的调用链是：
+
+```
+/etc/inittab → /usr/libexec/login.sh → /usr/bin/fwx_cli.sh → check_and_init_network()
+```
+
+也就是说**只在串口/VGA 控制台登录时才会触发**。无头机器上不会跑，
+这里设定的静态地址会一直保持；多网口机器有 WAN，本来也不会触发。
+
+### 12.4 一个会静默出错的坑（已修）
+
+改完参数重新构建时，很容易出现「**参数改了，却编出和上次一样的包集**」。
+根因有两层，必须同时处理：
+
+1. **make 不把 `.build-options` 当成 `prepare-tmpinfo` 的依赖。**
+   它的时间戳变了，但 `tmp/` 里的 Kconfig 元数据不会重算 ——
+   `config DEFAULT_<包>` 这个符号压根不会生成，于是包里的
+   `default y if DEFAULT_<包>` 恒为假。
+
+2. **`make defconfig` 只补缺失的符号，不覆盖已有值。**
+   就算元数据重算了，`.config` 里那句 `# CONFIG_PACKAGE_x is not set`
+   是显式值，会被原样保留。
+
+所以 `apply-build-options.sh` 会在参数**发生变化**时同时删掉 `tmp/` 与 `.config`
+（旧配置备份为 `.config.old`）。参数没变则什么都不动，不影响增量构建。
+
+这个坑是实测踩出来的：当时出现了「docker 明明关掉了，验证脚本却报
+『以下包本应被移除，却仍然启用』」的假失败。
+
+### 12.5 另一个坑：GitHub Actions 的 boolean 假值
+
+工作流里**不能**写：
+
+```yaml
+ENABLE_DOCKER: ${{ inputs.enable_docker || '1' }}
+```
+
+GitHub 表达式里 `false` 是假值，`false || '1'` 会得到 `'1'` ——
+用户明明取消了勾选，固件里却仍然编进了 Docker。
+
+正确做法是直接传输入原值（`${{ inputs.enable_docker }}`），
+push 触发时它渲染为空字符串，由脚本自己判定「空 = 用默认」。
+语义单一，也不会踩这个坑。
