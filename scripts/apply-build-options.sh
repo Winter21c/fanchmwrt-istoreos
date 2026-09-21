@@ -122,8 +122,18 @@ FANCHMWRT_ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE
 EOF
 
 OPTIONS_CHANGED=0
-if [ -f "$OPTIONS_FILE" ] && ! cmp -s "$TMP_OPT" "$OPTIONS_FILE"; then
+CHANGE_REASON=""
+if [ ! -f "$OPTIONS_FILE" ]; then
+	# 首次生成也算「变化」。这一条不能省：
+	# scripts/feeds install -a 自己会跑 make，从而生成 tmp/ 里的 Kconfig
+	# 元数据 —— 而那时候 .build-options 还不存在、Docker 取的是默认值 1。
+	# 如果这里不把 tmp/ 作废，后面 make defconfig 会直接复用那批过期元数据，
+	# 结果是「参数选了不含 Docker，固件里却仍然有 Docker」。
 	OPTIONS_CHANGED=1
+	CHANGE_REASON="首次生成构建参数"
+elif ! cmp -s "$TMP_OPT" "$OPTIONS_FILE"; then
+	OPTIONS_CHANGED=1
+	CHANGE_REASON="构建参数有变化"
 fi
 mv "$TMP_OPT" "$OPTIONS_FILE"
 say "已写入 $OPTIONS_FILE"
@@ -217,7 +227,7 @@ fi
 # 旧 .config 备份成 .config.old（OpenWrt 既有约定，已在 .gitignore 里）。
 # ---------------------------------------------------------------------------
 if [ "$OPTIONS_CHANGED" = "1" ]; then
-	echo "==> 构建参数有变化，作废过期的缓存"
+	echo "==> $CHANGE_REASON，作废过期的缓存"
 	if [ -f "$TOPDIR/.config" ]; then
 		cp "$TOPDIR/.config" "$TOPDIR/.config.old"
 		rm -f "$TOPDIR/.config"
