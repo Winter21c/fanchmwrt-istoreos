@@ -275,4 +275,88 @@ export CURL_OPTIONS="--speed-limit 51200 --speed-time 60"
 
 ## 9. 构建与验证结果
 
-（见 `verify-merged-firmware.sh` 的运行输出与本文件末尾的追加记录。）
+已在本机完成一次完整构建（x86_64，12 并发），随后又做了一次增量重建。
+`sha256sums` 里 16 个文件全部校验通过。
+
+### 9.1 产物
+
+`bin/targets/x86/64/`，可刷写的镜像：
+
+| 镜像 | 大小 | 说明 |
+|---|---|---|
+| `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 124 MB | **推荐**：squashfs + EFI，支持恢复出厂 |
+| `openwrt-x86-64-generic-squashfs-combined.img.gz` | 124 MB | squashfs + BIOS 引导 |
+| `openwrt-x86-64-generic-ext4-combined-efi.img.gz` | 156 MB | ext4 + EFI |
+| `openwrt-x86-64-generic-ext4-combined.img.gz` | 156 MB | ext4 + BIOS 引导 |
+| `openwrt-x86-64-generic-targz-combined-efi.img.gz` | 155 MB | targz + EFI |
+| `openwrt-x86-64-generic-rootfs.tar.gz` | 148 MB | rootfs 内容（便于免刷机核验） |
+
+镜像比 fanchmwrt 原版大很多，主要是 `containerd`（Docker 运行时）、`samba4`、
+`nfs-kernel-server`、`ntfs-3g`/`btrfs-progs`/`smartmontools`（DiskMan 依赖）
+这几块。rootfs 分区在 `CONFIG_TARGET_ROOTFS_PARTSIZE=1024`（1 GB），
+并已由 fanchmwrt 的 `fwx_init` 自动置 `EXPAND_ROOT=1`，首次启动会扩展分区。
+
+### 9.2 集成验证
+
+`./scripts/verify-merged-firmware.sh` 直接从固件的 `rootfs.tar.gz` 与
+`.manifest` 校验，**107 项全部通过、0 失败**，覆盖：
+
+- **包清单**：fanchmwrt 侧（主题、fwx 全套 18 个应用 + `fwxd` + `kmod-fwx`）、
+  iStoreOS 侧（面板 / Docker / iStore）、磁盘与共享套件，共 40+ 个关键包
+- **主题改动**：两个新图标、`.menu-icon-store` / `.menu-icon-quickstart`、
+  菜单归类、图标映射
+- **首页归属**：`fwx_dashboard` 的 order 为 1，`quickstart` 的 menu.d 为 2
+- **Docker**：`dockerd.init` 的新 hotplug/uci-defaults/fstab.d 脚本齐全，
+  `iptables '0'`，旧的全局 br-netfilter sysctl 确认已移除，
+  DockerNAT 与 data_root 两个 uci-defaults 到位
+- **iStore / QuickStart / DiskMan / NFS / Samba4 / mergerfs / unishare / webdav2**
+  的文件与 controller 均落到 rootfs
+
+已确认的版本：
+
+```
+luci-theme-fanchmwrt     26.264.03002~afc4d28
+luci-app-fwx-dashboard   1.0.1-r1        luci-app-fwx-app-center  1.0.0-r1
+fwxd                     1.0.4-r1
+luci-app-quickstart      0.12.10-r1      quickstart               0.13.0-r1
+luci-app-dockerman       26.133.20346~e9ebca7
+dockerd                  27.3.1-r5       docker   27.3.1-r2   docker-compose 2.40.3-r1
+luci-app-store           0.2.1-r1        taskd    1.0.3-r2
+luci-app-diskman         0.2.13-r1
+luci-app-nfs             1.2.0-r1        luci-app-samba4  26.133.20346~e9ebca7
+luci-app-mergerfs        1.0.3-r1        mergerfs 2.40.2-r5
+luci-app-unishare        1.0.2-r1        unishare 1.1.2-r1  webdav2 4.3.2-r1
+wsdd2                    2023.12.21~b676d8ac-r2
+istoreos-merge           1.0-r1
+```
+
+清单里共 515 个包。
+
+### 9.3 复现用的 feed 提交
+
+`bin/targets/x86/64/feeds.buildinfo` 记录了本次构建实际用到的提交。
+新增的六个 feed 当时都在分支 HEAD 上，建议按需 pin：
+
+```
+istore      3fca15b30aeed9ecacb3efc8b4a8b9c2584ad5c7
+nas         eccb7386ec14d2af36e9643f8f611d8dc92ac702a
+nas_luci    7eac499c8983d814c36dc87785aabfc630c66716
+istoreapps  e2e8e742f5ce3265445d0540dae2fa4c60976db5
+third       335fa421e0fcd673a78986117981d4dfa3bf57d7
+diskman     c20df1d4f40d86e32fd919f33122b2a48f8a99b4
+```
+
+（`fanchmwrt` feed 本身也记在 `feeds.buildinfo` 里：`75c3c55e1d…`。）
+
+### 9.4 尚未验证的部分
+
+编译、打包、镜像内容都已验证；**真机运行行为未验证**（需要实际刷机或起 QEMU）。
+具体包括：iStore 能否拉到应用列表、QuickStart 面板能否正常渲染、Dockerman 能否
+真正起容器、`fwx` 的 ubus 接口在有真实流量时的表现。这些依赖运行中的 LuCI 与网络，
+建议刷到虚拟机或设备上确认。
+
+另有一处**上游遗留问题**（非本次引入）：fanchmwrt 的 `DEFAULT_PACKAGES.router`
+里列了 `luci-app-fwx-firewall`，但 `feeds/fanchmwrt/` 里**没有这个包**。
+Kconfig 会静默忽略它（连 `# ... is not set` 都不写），所以不影响构建，
+本次也没有去改上游那份清单。
+

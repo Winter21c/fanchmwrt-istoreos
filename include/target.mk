@@ -149,7 +149,7 @@ endif
 DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 
 ##@
-# @brief iStoreOS 集成包。
+# @brief iStoreOS 集成包 + fwx 应用中心。
 #
 # 只对 x86_64 生效：
 #   * quickstart 后端只有 x86_64 / aarch64 / arm 的预编译二进制，而
@@ -161,6 +161,10 @@ DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 # （默认 y）会在依赖者身上展开成 `depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils`。
 # 不选 xz-utils 时该约束不可满足，Kconfig 会把 luci-app-store / luci-app-quickstart
 # 连同提示符一起隐藏 —— .config 里连 "# ... is not set" 都不会出现。
+#
+# luci-app-fwx-app-center 是 fwx 全家桶里唯一没被 DEFAULT_PACKAGES.router 收录的
+# 成员（上游只把它当可选包）。既然要求是「fanchmwrt 的所有服务」，这里显式补上；
+# 它是纯 LuCI Lua 应用，不引入任何新的构建依赖。
 ##
 ifneq ($(filter x86_64,$(ARCH)),)
   DEFAULT_PACKAGES += \
@@ -173,6 +177,7 @@ ifneq ($(filter x86_64,$(ARCH)),)
 	luci-app-nfs \
 	luci-app-mergerfs \
 	luci-app-unishare \
+	luci-app-fwx-app-center \
 	istoreos-merge \
 	wsdd2 \
 	xz-utils
