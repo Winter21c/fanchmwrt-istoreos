@@ -1,0 +1,252 @@
+# GitHub Actions 在线编译 x86_64 固件
+#
+# 三种用法：
+#   1. 手动触发：仓库页面 → Actions → 「构建 x86_64 固件」→ Run workflow
+#      可以勾选是否创建 Release、是否上传构建产物。
+#   2. 打 tag 自动发布：push 一个 v* 标签（如 v25.12.4-istoreos.3），
+#      编译完成后自动创建同名 Release 并把镜像挂上去。
+#   3. 定时构建（默认注释掉）：用来提前发现上游腐烂，见文件末尾说明。
+#
+name: 构建 x86_64 固件
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: '构建成功后创建 Release'
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Release 标签（留空 = 自动用 日期-时间）'
+        type: string
+        required: false
+      upload_artifact:
+        description: '把镜像作为构建产物上传（Actions 页面可直接下载）'
+        type: boolean
+        default: true
+
+  push:
+    tags:
+      - 'v*'
+
+# 创建 Release 需要写权限；读取代码只需要读权限。
+permissions:
+  contents: write
+
+# 同一分支/标签同时只跑一个，避免两次构建互相覆盖产物。
+concurrency:
+  group: build-x86_64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 编译 x86_64
+    runs-on: ubuntu-24.04
+    # GitHub 单个 job 上限是 360 分钟。整棵 OpenWrt 在 4 核 runner 上
+    # 大约 2～3 小时，这里留出余量但不超过上限。
+    timeout-minutes: 350
+
+    env:
+      # 慢镜像保护：scripts/download.pl 会把 CURL_OPTIONS 拼进每一次 curl。
+      # runner 在境外，但上游仍可能有个别镜像很慢，保留这个下限让它自动换源。
+      CURL_OPTIONS: --speed-limit 51200 --speed-time 60
+
+    steps:
+      # ---------------------------------------------------------------------
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # 不需要完整历史：scripts/getver.sh 是 try_version || try_git，
+          # 树里的 version 文件已经提供了版本号。这样省掉 280MB 的 fetch。
+          fetch-depth: 1
+
+      # ---------------------------------------------------------------------
+      # OpenWrt 全量编译需要约 30GB。GitHub 的 runner 根分区初始只有约 14GB
+      # 可用，不清理会在编到一半时 "No space left on device"。
+      - name: 释放磁盘空间
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift \
+            /usr/local/.ghcup \
+            /opt/az \
+            /usr/lib/jvm || true
+          sudo apt-get clean
+          echo "=== 清理后 ==="
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gettext \
+            git libncurses-dev libssl-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget time
+
+      # ---------------------------------------------------------------------
+      # 缓存下载的源码包（dl/，约 1.4GB）。
+      # 主要不是为了省时间（编译才是大头），而是防止某个上游 tarball
+      # 哪天消失导致构建失败 —— 命中缓存时压根不会去下载。
+      # key 只跟 feeds.conf.default 走：它改了才说明包来源变了。
+      - name: 缓存源码包
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: dl-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            dl-
+
+      # ---------------------------------------------------------------------
+      # 复用仓库里的构建脚本做「准备」阶段（feeds / 补丁 / 配置 / 校验），
+      # 保证 CI 与本地构建用的是同一套逻辑；SKIP_BUILD 让它停在编译前，
+      # 下载与编译分开成独立步骤，日志和重试边界都更清楚。
+      - name: 准备（feeds / 补丁 / 配置 / 校验）
+        env:
+          SKIP_BUILD: '1'
+        run: ./build-merged-x86_64.sh
+
+      - name: 下载源码
+        run: make -j"$(nproc)" download || echo "::warning::部分源码下载失败，编译阶段 make 会重试"
+
+      - name: 编译固件
+        run: make -j"$(nproc)" BUILD_LOG=1
+
+      # ---------------------------------------------------------------------
+      - name: 编译失败时输出日志
+        if: failure()
+        run: |
+          echo "=== 最近修改的构建日志 ==="
+          find logs -type f -name '*.txt' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | head -3 | cut -d' ' -f2- \
+            | while read -r f; do
+                echo "----- $f -----"
+                tail -60 "$f"
+              done
+          echo "=== 磁盘占用 ==="
+          df -h /
+
+      - name: 核验产物
+        run: ./scripts/verify-merged-firmware.sh
+
+      - name: 汇总产物信息
+        id: summary
+        run: |
+          MANIFEST=$(ls -1 bin/targets/x86/64/*.manifest | head -1)
+          PKGCOUNT=$(wc -l < "$MANIFEST")
+          VERSION=$(cat bin/targets/x86/64/version.buildinfo 2>/dev/null || echo unknown)
+          {
+            echo "pkgcount=$PKGCOUNT"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### 构建成功"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|---|---|"
+            echo "| 版本 | \`$VERSION\` |"
+            echo "| 已安装软件包 | $PKGCOUNT 个 |"
+            echo "| 核验 | 全部通过 |"
+            echo ""
+            echo "| 镜像 | 大小 |"
+            echo "|---|---|"
+            for f in bin/targets/x86/64/*.img.gz bin/targets/x86/64/*rootfs.tar.gz; do
+              [ -e "$f" ] || continue
+              printf '| `%s` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      - name: 上传构建产物
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanchmwrt-istoreos-x86_64
+          path: |
+            bin/targets/x86/64/*.img.gz
+            bin/targets/x86/64/*rootfs.tar.gz
+            bin/targets/x86/64/sha256sums
+            bin/targets/x86/64/*.manifest
+            bin/targets/x86/64/*.buildinfo
+          if-no-files-found: error
+          retention-days: 30
+
+      # ---------------------------------------------------------------------
+      - name: 确定 Release 标签
+        id: tag
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.release_tag }}"
+            [ -n "$TAG" ] || TAG="$(date -u +%Y%m%d-%H%M)-istoreos"
+          fi
+          # 标签会被写进 Release 说明模板（sed 替换）并当参数传给 gh，
+          # 所以这里严格限定字符集 —— 既是防 sed 注入，也是挡住非法 git tag。
+          case "$TAG" in
+            *[!A-Za-z0-9._-]*|'')
+              echo "::error::非法的 Release 标签：'$TAG'（只允许字母、数字、点、下划线、连字符）"
+              exit 1
+              ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "将使用标签：$TAG"
+
+      - name: 生成 Release 说明
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          PKGCOUNT: ${{ steps.summary.outputs.pkgcount }}
+          VERSION: ${{ steps.summary.outputs.version }}
+        run: |
+          sed -e "s/@TAG@/${TAG}/g" \
+              -e "s/@VERSION@/${VERSION}/g" \
+              -e "s/@PKGCOUNT@/${PKGCOUNT}/g" \
+              -e "s/@DATE@/$(date -u +%Y-%m-%d)/g" \
+              .github/release-notes.md > /tmp/release-notes.md
+          echo "=== Release 说明预览 ==="
+          head -30 /tmp/release-notes.md
+
+      - name: 创建或更新 Release
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -e
+          ASSETS=$(ls -1 \
+            bin/targets/x86/64/*.img.gz \
+            bin/targets/x86/64/*rootfs.tar.gz \
+            bin/targets/x86/64/sha256sums \
+            bin/targets/x86/64/*.manifest)
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，改为覆盖附件"
+            gh release upload "$TAG" $ASSETS --clobber
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG" \
+              --title "FanchmWrt × iStoreOS 融合固件 $TAG" \
+              --notes-file /tmp/release-notes.md \
+              $ASSETS
+          fi
+          echo "完成：$(gh release view "$TAG" --json url --jq .url)"
+
+# ---------------------------------------------------------------------------
+# 定时构建（可选）
+#
+# 上游会腐烂：例如 v2fly/domain-list-community 的数据 tag 只保留约三个月，
+# 我们就被这个问题卡过一次（详见 MERGE-NOTES 4.3.1）。每周跑一次能在用户
+# 之前发现这类问题，而不是等别人 clone 后构建失败来提 issue。
+#
+# 公开仓库的 Actions 额度是免费的，一周一次 3 小时的构建可以接受；
+# 不需要的话保持注释即可。
+# ---------------------------------------------------------------------------
+#  schedule:
+#    - cron: '0 2 * * 1'   # 每周一 02:00 UTC

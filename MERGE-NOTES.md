@@ -524,3 +524,72 @@ Dockerman 的 Web 界面只验证到后端 RPC 与 daemon 正常，没有实际�
 这些建议刷到真实设备或带桥接网络的虚拟机里再确认。
 
 
+
+---
+
+## 11. 在线编译（GitHub Actions）
+
+### 11.1 为什么先删掉上游的 CI
+
+FanchmWrt 是从 OpenWrt 直接分出来的，`.github/` 下原样带着 OpenWrt 官方的
+**14 个工作流**和项目配置。它们不是「没用的东西」，而是**会真的跑起来**的：
+
+| 文件 | 触发条件 | 在本仓库的后果 |
+|---|---|---|
+| `tools.yml` | `push` 命中 `include/**`、`tools/**` | 改一次 `include/target.mk` 就会触发跨平台 host tools 构建 |
+| `github-release.yml` | `push` 标签 `v*` | **与我们自己的发布流程直接冲突** |
+| `packages.yml` / `kernel.yml` | `push`/`pull_request` 命中若干路径 | 触发 OpenWrt 的包/内核矩阵构建 |
+| `push-containers.yml` / `toolchain.yml` | `push` 命中 `tools/**`、`toolchain/**` | 触发容器与工具链构建 |
+| `coverity.yml` | 每周定时 | 需要 `COVERITY_TOKEN`，必然失败 |
+| `build-on-comment.yml` / `labeler.yml` / `label-*.yml` | 评论 / PR | 依赖 OpenWrt 组织的配置 |
+
+而且它们底层都 `uses: openwrt/actions-shared-workflows/...@main` —— 是给
+OpenWrt 官方基础设施用的，在派生仓库里跑不通。
+
+`FUNDING.yml` 指向 OpenWrt 的捐赠页，`ISSUE_TEMPLATE/` 把用户引导到 OpenWrt
+论坛和 triage —— 放在这个仓库里都会误导人。
+
+所以把这些一并删掉，换成我们自己的工作流。**这些都不影响编译**，只影响 CI 行为。
+
+### 11.2 工作流设计
+
+`.github/workflows/build-x86_64.yml`，三种触发方式：
+
+- `workflow_dispatch` —— 手动，可选是否建 Release、是否传构建产物
+- `push: tags: v*` —— 打标签自动编译并发布
+- `schedule`（默认注释掉）—— 每周构建，用来提前发现上游腐烂
+
+几个关键取舍：
+
+**准备阶段直接复用 `build-merged-x86_64.sh`。** 给它加了个 `SKIP_BUILD=1`
+开关，让它停在编译前。这样 feeds / 补丁 / 配置 / 校验这套逻辑在本地和 CI
+是**同一份代码**，不会出现「本地能编、CI 编不出来」；同时下载与编译仍是独立
+的 step，日志和重试边界都清楚。
+
+**`fetch-depth: 1`。** `scripts/getver.sh` 的解析顺序是
+`try_version || try_git || try_hg`，而树里的 `version` 文件
+（内容 `r32933-4ccb782af7`）已经提供了版本号，`try_version` 直接命中，
+根本不会走到 git 分支。所以不需要拉 280MB 的完整历史。
+
+**必须先释放磁盘空间。** GitHub 的 runner 根分区初始只有约 14GB 可用，
+而整棵 OpenWrt 编译需要约 30GB，不清理会在编到一半时
+`No space left on device`。工作流开头删掉 runner 预装但用不到的
+.NET / Android SDK / CodeQL 等。
+
+**缓存 `dl/`。** 主要目的不是省时间（编译才是大头，约 2～3 小时），
+而是**防止某个上游 tarball 消失导致构建失败** —— 命中缓存时根本不会去下载。
+key 只跟 `feeds.conf.default` 走：它变了才说明包来源变了。
+
+**核验不通过就不发布。** `.config` 校验（必需包齐全 + 排除包不在）和
+`verify-merged-firmware.sh` 都排在创建 Release 之前。
+
+**标签做了字符集校验。** 标签会经 `sed` 写进 Release 说明模板、也会当参数传给
+`gh`，所以限定为 `[A-Za-z0-9._-]+` —— 既挡 sed 注入，也顺带挡住非法 git tag。
+
+### 11.3 额度的现实预期
+
+公开仓库的 Actions 不计费。单次构建在 4 核 runner 上约 2～3 小时，
+`timeout-minutes` 设为 350（GitHub 单 job 上限 360）。
+
+跑满 6 小时的极端情况（比如 runner 特别慢、或 Go 包并发下载卡住）会超时失败，
+重跑一次通常就好了。

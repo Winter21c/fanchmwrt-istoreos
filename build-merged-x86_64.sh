@@ -92,6 +92,13 @@ fi
 
 echo "==> .config 校验通过：$(echo $MUST_HAVE | wc -w) 个必需包已启用，$(echo $MUST_NOT_HAVE | wc -w) 个排除包确认未启用"
 
+# 给 CI 用：只做到"准备就绪"，把下载和编译留给调用方分步执行，
+# 这样 GitHub Actions 里每一步都有独立的日志与重试边界。
+if [ -n "$SKIP_BUILD" ]; then
+	echo "==> SKIP_BUILD 已设置，停在准备阶段（feeds / 补丁 / 配置均已就绪）"
+	exit 0
+fi
+
 # --- 4. 构建 ----------------------------------------------------------------
 echo "==> 下载源码"
 make -j"$JOBS" download || echo "WARNING: 部分下载失败，make 会重试"

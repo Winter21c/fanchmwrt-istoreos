@@ -136,6 +136,62 @@ FanchmWrt 在没有 **WAN 口** 的时候，会自动把设备切成**旁路模�
 
 ---
 
+## ☁️ 在线编译（不用自己的机器）
+
+仓库自带 **GitHub Actions** 工作流，直接在 GitHub 的服务器上编译，编译完可以把镜像
+下载下来或者直接发布成 Release。适合不想在本地装 30 GB 工具链、或者机器太慢的情况。
+
+### 怎么用
+
+**方式一：手动点一下**
+
+1. 打开仓库的 **Actions** 标签页
+2. 左侧选「**构建 x86_64 固件**」
+3. 右边 **Run workflow**，按需勾选：
+   - `create_release` —— 编译完自动创建 Release
+   - `release_tag` —— 指定标签，留空则自动用日期时间
+   - `upload_artifact` —— 把镜像上传成构建产物（Actions 页面可直接下载）
+4. 大约 **2～3 小时**后出结果
+
+**方式二：打个标签就自动发布**
+
+```sh
+git tag v25.12.4-istoreos.3
+git push origin v25.12.4-istoreos.3
+```
+
+推上去之后会自动编译，成功后创建一个同名 Release 并把镜像挂上去 —— 也就是
+本仓库现有那三个 Release 的来法。
+
+### 流水线做了什么
+
+```
+检出代码 → 释放磁盘空间（runner 初始只有约 14GB，OpenWrt 要 30GB）
+        → 安装依赖 → 恢复 dl/ 缓存
+        → 准备：feeds / 补丁 / 配置 / 校验   ← 复用本仓库的 build-merged-x86_64.sh
+        → make download → make -j$(nproc)
+        → verify-merged-firmware.sh 逐项核验
+        → 上传产物 / 创建 Release
+```
+
+几个设计取舍：
+
+- **准备阶段直接调用 `build-merged-x86_64.sh`**（带 `SKIP_BUILD=1`），
+  这样 CI 和本地用的是同一套逻辑，不会出现「本地能编、CI 编不出来」。
+- **`fetch-depth: 1`**：不需要完整 git 历史。`scripts/getver.sh` 是
+  `try_version || try_git`，树里的 `version` 文件已经给了版本号，
+  省掉 280MB 的 fetch。
+- **缓存 `dl/`**：主要不是为了省时间（编译才是大头），而是防止某个上游
+  tarball 哪天消失导致构建失败。
+- **核验不通过就不会发布**：`.config` 校验 + rootfs 逐项核验都在发布之前。
+
+### 关于 Actions 额度
+
+本仓库是公开仓库，GitHub 对公开仓库的 Actions **不计费**。
+单次构建约消耗 2～3 小时 runner 时间。
+
+---
+
 ## 🛠️ 自己编译
 
 需要 Linux（推荐 Ubuntu 22.04+）、约 30 GB 磁盘、能访问 GitHub 与 Go 模块代理。
@@ -238,9 +294,15 @@ merge-patches/                3 个定点补丁（Docker / QuickStart / v2ray-ge
 scripts/                      补丁应用脚本 + 产物核验脚本
 package/istoreos-merge/       Docker 在 fw4 下的 NAT 规则、squashfs 上的数据目录落点
 package/fcm/luci-theme-fanchmwrt/   新菜单的图标与归类
+.github/                      在线编译工作流（替换掉 OpenWrt 上游的 CI）
 ```
 
-三处值得一提的地方：
+另外**删掉了 OpenWrt 上游的 14 个 CI 工作流**和项目配置（`.github/workflows/`、
+`FUNDING.yml`、`ISSUE_TEMPLATE/` 等）。它们是为 OpenWrt 官方基础设施写的：
+其中 `tools.yml` 会在改动 `include/**` 时触发跨平台工具链构建，`github-release.yml`
+会在推送 `v*` 标签时触发 OpenWrt 的发布流程 —— 在本仓库里既跑不通也会误导使用者。
+
+四处值得一提的地方：
 
 - **Docker 不是简单装个包**：上游的 `dockerd` 默认自己管 iptables，会和 OpenWrt 的
   fw4 打架。本项目移植了 iStoreOS 对 `dockerd` 的定制补丁（关闭 docker 自带
