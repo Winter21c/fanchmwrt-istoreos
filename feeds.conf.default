@@ -33,3 +33,6 @@ src-git istoreapps https://github.com/linkease/openwrt-apps.git;main
 src-git third https://github.com/jjm2473/openwrt-third.git;main
 # luci-app-diskman（磁盘管理）
 src-git diskman https://github.com/lisaac/luci-app-diskman.git;master
+# mosdns（DNS 转发器）+ luci-app-mosdns
+# 官方 packages feed 早已移除 mosdns，这里用社区维护的 v5 分支
+src-git mosdns https://github.com/sbwml/luci-app-mosdns.git;v5

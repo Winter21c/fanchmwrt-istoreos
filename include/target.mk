@@ -149,7 +149,7 @@ endif
 DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 
 ##@
-# @brief iStoreOS 集成包 + fwx 应用中心。
+# @brief 本项目额外选中的包（仅 x86_64）。
 #
 # 只对 x86_64 生效：
 #   * quickstart 后端只有 x86_64 / aarch64 / arm 的预编译二进制，而
@@ -163,8 +163,10 @@ DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))
 # 连同提示符一起隐藏 —— .config 里连 "# ... is not set" 都不会出现。
 #
 # luci-app-fwx-app-center 是 fwx 全家桶里唯一没被 DEFAULT_PACKAGES.router 收录的
-# 成员（上游只把它当可选包）。既然要求是「fanchmwrt 的所有服务」，这里显式补上；
-# 它是纯 LuCI Lua 应用，不引入任何新的构建依赖。
+# 成员（上游只把它当可选包），这里显式补上；纯 LuCI Lua 应用，无额外构建依赖。
+#
+# luci-app-ttyd 只是给 ttyd 加菜单入口 —— ttyd 二进制本来就作为
+# luci-app-dockerman 的依赖存在于固件里，所以这个几乎不增加体积。
 ##
 ifneq ($(filter x86_64,$(ARCH)),)
   DEFAULT_PACKAGES += \
@@ -172,8 +174,8 @@ ifneq ($(filter x86_64,$(ARCH)),)
 	luci-app-store \
 	luci-app-dockerman \
 	luci-app-diskman \
-	luci-app-hd-idle \
-	luci-app-samba4 \
+	luci-app-mosdns \
+	luci-app-ttyd \
 	luci-app-nfs \
 	luci-app-mergerfs \
 	luci-app-unishare \
@@ -182,6 +184,28 @@ ifneq ($(filter x86_64,$(ARCH)),)
 	wsdd2 \
 	xz-utils
 endif
+
+##@
+# @brief 本项目明确**不要**的包。
+#
+# OpenWrt 的 DEFAULT_PACKAGES 支持 "-包名" 做移除：scripts/target-metadata.pl 的
+# merge_package_lists() 会把 `-pkg` 和 `pkg` 一起消掉。所以这里不需要去改
+# FanchmWrt 原有的 DEFAULT_PACKAGES.router —— 上游清单保持原样，差异集中在这里，
+# 一眼就能看出本项目动了哪些包。
+#
+# 两点说明：
+#   * luci-app-uhttpd 只是 uhttpd 的配置界面。uhttpd 与 uhttpd-mod-ubus 由
+#     luci-light（→ luci 集合）依赖，移除本项**不会**影响 Web 管理界面。
+#   * luci-app-samba4 同理：samba4-server 仍由 unishare 依赖，SMB 服务与其
+#     数据仍可正常工作，只是没有 LuCI 配置入口。
+##
+DEFAULT_PACKAGES += \
+	-luci-app-ddns \
+	-luci-app-hd-idle \
+	-luci-app-samba4 \
+	-luci-app-uhttpd \
+	-luci-app-upnp \
+	-luci-app-wol
 
 ##@
 # @brief Filter out packages, prepended with `-`.

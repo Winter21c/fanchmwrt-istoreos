@@ -56,18 +56,29 @@ iStoreOS 强在**应用侧**：一个开箱即用的首页面板、图形化 Doc
 | **iStore 应用商店** | 图形化装插件，带教程与依赖解析；支持备份/恢复 |
 | **Docker（Dockerman）** | `dockerd` + `docker` + `docker-compose`，图形化管理容器 / 镜像 / 网络 / 卷 |
 | **磁盘管理 DiskMan** | 分区、格式化、挂载、SMART 检测 |
-| **硬盘休眠 hd-idle** | 空闲自动停转 |
+| **Web 终端 ttyd** | 浏览器里直接开 shell，不用装 SSH 客户端 |
 
-### 🗄️ 顺手带上的轻 NAS 套件
+### 🗄️ 轻 NAS 套件
 
 | 功能 | 说明 |
 |---|---|
-| **Samba4** | 局域网文件共享（Windows 直接访问） |
+| **Samba4** | 局域网文件共享（Windows 直接访问）。保留服务端，未装 LuCI 配置界面 |
 | **NFS** | Linux / 虚拟机场景的网络文件系统 |
 | **WebDAV** | 跨平台远程文件访问 |
 | **wsdd2** | 让 Windows 网络邻居能自动发现这台机器 |
 | **mergerfs** | 把多块硬盘合并成一个池 |
 | **UniShare** | 统一管理上面这些共享 |
+
+### 🌐 DNS 分流
+
+| 功能 | 说明 |
+|---|---|
+| **mosdns** | 高性能 DNS 转发 / 分流器，支持按域名与 IP 分流、缓存、防污染 |
+| **geoip / geosite 规则库** | 随 mosdns 一起提供的分流规则数据 |
+
+> 本项目**没有**包含 DDNS、网络唤醒（WOL）、UPnP、硬盘休眠，以及 uhttpd /
+> Samba 的 LuCI 配置界面 —— 这是在 `include/target.mk` 里显式声明的。
+> 需要的话在 iStore 商店里装，或自己改回来重新编译。
 
 ---
 
@@ -79,11 +90,11 @@ iStoreOS 强在**应用侧**：一个开箱即用的首页面板、图形化 Doc
 
 | 镜像 | 大小 | 什么时候用 |
 |---|---|---|
-| `…squashfs-combined-efi.img.gz` | 124 MB | **推荐**。UEFI 启动，squashfs 支持一键恢复出厂 |
-| `…squashfs-combined.img.gz` | 124 MB | 传统 BIOS 启动，同样支持恢复出厂 |
-| `…ext4-combined-efi.img.gz` | 156 MB | UEFI 启动，ext4 根文件系统，想随意改系统文件时用 |
-| `…ext4-combined.img.gz` | 156 MB | 传统 BIOS + ext4 |
-| `…rootfs.tar.gz` | 148 MB | 只想看/提取文件内容，不刷机 |
+| `…squashfs-combined-efi.img.gz` | 131 MB | **推荐**。UEFI 启动，squashfs 支持一键恢复出厂 |
+| `…squashfs-combined.img.gz` | 131 MB | 传统 BIOS 启动，同样支持恢复出厂 |
+| `…ext4-combined-efi.img.gz` | 166 MB | UEFI 启动，ext4 根文件系统，想随意改系统文件时用 |
+| `…ext4-combined.img.gz` | 166 MB | 传统 BIOS + ext4 |
+| `…rootfs.tar.gz` | 160 MB | 只想看/提取文件内容，不刷机 |
 
 > **UEFI 还是 BIOS？** 近十年的机器基本都是 UEFI，选带 `efi` 的那个。
 > 拿不准就先试 `squashfs-combined-efi`，起不来再换不带 `efi` 的。
@@ -184,7 +195,7 @@ make -j$(nproc) BUILD_LOG=1
 - **默认主题**：`luci-theme-fanchmwrt`
 - **默认首页**：FanchmWrt 仪表盘（QuickStart 面板排在菜单第二位）
 - **rootfs 分区**：1 GB，首次启动自动扩容
-- **已安装软件包**：515 个
+- **已安装软件包**：504 个
 
 <details>
 <summary>点开看关键组件版本</summary>
@@ -201,11 +212,13 @@ dockerd                   27.3.1-r5      docker         27.3.1-r2
 docker-compose            2.40.3-r1
 luci-app-store            0.2.1-r1       taskd          1.0.3-r2
 luci-app-diskman          0.2.13-r1
-luci-app-samba4           26.133.20346~e9ebca7
+luci-app-mosdns           1.7.14-r1      mosdns         5.3.4-r14
+luci-app-ttyd             26.133.20346~e9ebca7            ttyd  1.7.7-r1
 luci-app-nfs              1.2.0-r1
 luci-app-mergerfs         1.0.3-r1       mergerfs       2.40.2-r5
 luci-app-unishare         1.0.2-r1       unishare       1.1.2-r1
 webdav2                   4.3.2-r1       wsdd2          2023.12.21
+samba4-server             4.22.7-r3      nfs-kernel-server
 istoreos-merge            1.0-r1
 ```
 
@@ -218,18 +231,27 @@ istoreos-merge            1.0-r1
 对 FanchmWrt 原树的改动**只有 5 个文件被修改、4 个路径被新增**，其余全部来自上游 feed：
 
 ```
-feeds.conf.default            新增 6 个 feed（iStore 商店、QuickStart、mergerfs、NFS、DiskMan）
-include/target.mk             x86_64 专用默认包清单
-merge-patches/                Docker 与 QuickStart 的定点补丁
+feeds.conf.default            新增 7 个 feed（iStore 商店、QuickStart、mergerfs、
+                              NFS、DiskMan、mosdns）
+include/target.mk             x86_64 专用包清单 + 「不要哪些包」的移除声明
+merge-patches/                3 个定点补丁（Docker / QuickStart / v2ray-geodata）
 scripts/                      补丁应用脚本 + 产物核验脚本
 package/istoreos-merge/       Docker 在 fw4 下的 NAT 规则、squashfs 上的数据目录落点
 package/fcm/luci-theme-fanchmwrt/   新菜单的图标与归类
 ```
 
-**Docker 不是简单装个包**：上游的 `dockerd` 默认自己管 iptables，会和 OpenWrt 的
-fw4 打架。本项目移植了 iStoreOS 对 `dockerd` 的定制补丁（关闭 docker 自带
-iptables、交给 fw4 统一管理、自动建立 docker ↔ wan/lan 的转发规则、限制容器日志
-大小等），并补上 `172.16.0.0/12` 的出网 NAT 规则。
+三处值得一提的地方：
+
+- **Docker 不是简单装个包**：上游的 `dockerd` 默认自己管 iptables，会和 OpenWrt 的
+  fw4 打架。本项目移植了 iStoreOS 对 `dockerd` 的定制补丁（关闭 docker 自带
+  iptables、交给 fw4 统一管理、自动建立 docker ↔ wan/lan 的转发规则、限制容器日志
+  大小等），并补上 `172.16.0.0/12` 的出网 NAT 规则。
+- **不要的包是用 `-包名` 声明的**，不改上游清单。OpenWrt 的 `DEFAULT_PACKAGES`
+  原生支持这种移除语法，差异集中在一处，一眼能看出本项目动了哪些包。
+- **`v2ray-geodata` 改用了滚动地址**：它要下载的 geoip/geosite 规则数据在上游是
+  「滚动发布 + 定期删旧 tag」（`domain-list-community` 只保留约三个月），
+  feed 里 pin 死的版本已经 404、会让构建直接失败。补丁改成
+  `releases/latest/download`，地址永不失效。
 
 完整的技术说明、设计取舍与验证记录见 **[MERGE-NOTES.md](MERGE-NOTES.md)**。
 
@@ -240,7 +262,8 @@ iptables、交给 fw4 统一管理、自动建立 docker ↔ wan/lan 的转发�
 不是「编译过了就发」：
 
 - 构建产物 **16 个文件 sha256 全部校验通过**
-- `verify-merged-firmware.sh` 从固件 rootfs 里逐项核对，**107 项断言全部通过**
+- `verify-merged-firmware.sh` 从固件 rootfs 里逐项核对，**131 项断言全部通过**，
+  其中包含「确认已排除的包确实不在固件里」的反向校验
 - 固件已在 **QEMU/KVM 下实际启动验证**：LuCI 正常响应、FanchmWrt 主题生效、
   Docker 起来了并且存储驱动是 `overlay2`、`dockerd`/`quickstart`/`istore`/`fwx`
   四个服务均为 enabled

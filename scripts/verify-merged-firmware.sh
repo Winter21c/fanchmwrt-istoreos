@@ -64,12 +64,46 @@ for p in base-files busybox firewall4 dnsmasq-full \
          luci-app-quickstart quickstart \
          luci-app-store taskd luci-lib-taskd luci-lib-xterm \
          luci-app-dockerman dockerd docker docker-compose \
+         luci-app-mosdns mosdns geo2txt \
+         luci-app-ttyd ttyd \
          istoreos-merge \
-         luci-app-diskman luci-app-hd-idle luci-app-samba4 luci-app-nfs \
+         luci-app-diskman luci-app-nfs \
          luci-app-mergerfs luci-app-unishare mergerfs unishare webdav2 wsdd2 \
-         xz-utils ; do
+         xz-utils \
+         uhttpd uhttpd-mod-ubus samba4-server ; do
 	check_pkg "$p"
 done
+
+# ---------------------------------------------------------------------------
+head_ "确认已排除的包确实不在固件里"
+
+# check_absent <包名> <说明>
+check_absent() {
+	if pkg_installed "$1"; then
+		bad "$1 仍在固件里（$2）"
+	else
+		ok "$1 已排除（$2）"
+	fi
+}
+
+check_absent luci-app-ddns   "本项目不需要 DDNS"
+check_absent luci-app-hd-idle "本项目不需要硬盘休眠"
+check_absent luci-app-wol    "本项目不需要网络唤醒"
+check_absent luci-app-upnp   "本项目不需要 UPnP"
+check_absent luci-app-uhttpd "只需要 uhttpd 本体，不需要它的配置界面"
+check_absent luci-app-samba4 "只需要 samba4-server（unishare 依赖），不需要它的配置界面"
+
+# 顺带确认这两个"界面没了但本体还在"的包没有被连带删掉。
+if pkg_installed uhttpd; then
+	ok "uhttpd 本体仍在（由 luci-light 依赖，未受 luci-app-uhttpd 移除影响）"
+else
+	bad "uhttpd 本体被误删 —— Web 管理界面会不可用！"
+fi
+if pkg_installed samba4-server; then
+	ok "samba4-server 仍在（由 unishare 依赖，未受 luci-app-samba4 移除影响）"
+else
+	bad "samba4-server 被误删 —— unishare 会缺依赖"
+fi
 
 # fanchmwrt 的 DEFAULT_PACKAGES.router 里列了 luci-app-fwx-firewall，但
 # feeds/fanchmwrt/ 里根本没有这个包 —— Kconfig 会静默忽略它（连
@@ -183,8 +217,22 @@ else
 	f /usr/sbin/webdav2                                  "webdav2"
 	f /usr/lib/lua/luci/controller/nfs.lua               "luci-app-nfs controller"
 	f /usr/sbin/rpc.nfsd                                 "nfs-kernel-server"
-	f /etc/init.d/hd-idle                                "hd-idle 服务"
 	f /etc/init.d/unishare                               "unishare 服务"
+
+	head_ "DNS 与终端"
+	# mosdns 只有二进制（GoPackage 安装），init 脚本与 /etc/config/mosdns
+	# 都由 luci-app-mosdns 提供 —— 两个包必须同时在。
+	f /usr/bin/mosdns                                    "mosdns 主程序"
+	f /etc/init.d/mosdns                                 "mosdns 服务（由 luci-app-mosdns 提供）"
+	f /etc/config/mosdns                                 "mosdns 配置"
+	f /usr/share/luci/menu.d/luci-app-mosdns.json        "mosdns 菜单"
+	f /usr/share/rpcd/ucode/luci.mosdns                  "mosdns RPC 后端"
+	f /usr/share/mosdns/mosdns.uc                        "mosdns ucode 模块"
+	if [ -d "$R/etc/mosdns/rule" ]; then ok "mosdns 规则目录"; else bad "mosdns 规则目录缺失"; fi
+	f /usr/bin/geo2txt                                   "geo2txt 数据转换工具"
+	f /usr/bin/ttyd                                      "ttyd 终端"
+	f /etc/init.d/ttyd                                   "ttyd 服务"
+	f /usr/share/luci/menu.d/luci-app-ttyd.json          "luci-app-ttyd 菜单"
 
 	head_ "运行时健全性"
 	f /bin/busybox                                       "busybox"

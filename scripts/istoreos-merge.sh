@@ -71,4 +71,20 @@ apply_patch "$PATCH_DIR/0001-dockerd-istoreos.patch" \
 apply_patch "$PATCH_DIR/0002-quickstart-menu-order.patch" \
 	"$TOPDIR/feeds/nas_luci"
 
+# ---------------------------------------------------------------------------
+# 3. v2ray-geodata：改用滚动 release，避免构建在某天突然卡死。
+#
+# 这个包不编译代码，只是下载 geoip/geosite 两个 DNS 分流规则数据文件。
+# 上游 v2fly 走的是「滚动发布 + 定期删除旧 tag」：
+#   v2fly/geoip                   保留约一年
+#   v2fly/domain-list-community   只保留约三个月（实测 571 个 release）
+# packages feed pin 的 20260326050832 已经 404，构建会在这里失败。
+# 改用 releases/latest/download 之后地址永不失效；代价是这两个数据文件
+# 不再做哈希校验（HASH:=skip）。
+#
+# mosdns 及其 LuCI 界面依赖这两个数据包，所以这一步是必需的。
+# ---------------------------------------------------------------------------
+apply_patch "$PATCH_DIR/0003-v2ray-geodata-rolling-releases.patch" \
+	"$TOPDIR/feeds/packages"
+
 exit 0

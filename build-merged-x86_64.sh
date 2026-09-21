@@ -29,7 +29,7 @@ echo "==> 并发   : $JOBS"
 
 # --- 1. feeds ---------------------------------------------------------------
 if [ ! -d feeds/luci ] || [ ! -d feeds/istore ] || [ ! -d feeds/nas_luci ] \
-   || [ ! -d feeds/diskman ] || [ ! -d feeds/istoreapps ]; then
+   || [ ! -d feeds/diskman ] || [ ! -d feeds/istoreapps ] || [ ! -d feeds/mosdns ]; then
 	echo "==> 拉取并安装 feed"
 	./scripts/feeds update -a
 	./scripts/feeds install -a
@@ -59,13 +59,19 @@ if [ ! -f .config ]; then
 fi
 
 # 集成要是没活过依赖解析，就在这里失败，而不是编出一个缺东西的固件。
-MISSING=""
-for pkg in luci-theme-fanchmwrt luci-app-fwx-dashboard \
+MUST_HAVE="luci-theme-fanchmwrt luci-app-fwx-dashboard \
            luci-app-quickstart quickstart luci-app-store \
            luci-app-dockerman dockerd docker docker-compose \
-           luci-app-diskman luci-app-hd-idle luci-app-samba4 \
+           luci-app-diskman luci-app-mosdns mosdns luci-app-ttyd ttyd \
            luci-app-nfs luci-app-mergerfs luci-app-unishare \
-           istoreos-merge wsdd2 xz-utils; do
+           istoreos-merge wsdd2 xz-utils uhttpd samba4-server"
+
+# 这些是本项目明确不要的（见 include/target.mk 的移除块）。
+MUST_NOT_HAVE="luci-app-ddns luci-app-hd-idle luci-app-samba4 \
+               luci-app-uhttpd luci-app-upnp luci-app-wol"
+
+MISSING=""
+for pkg in $MUST_HAVE; do
 	grep -q "^CONFIG_PACKAGE_${pkg}=y" .config || MISSING="$MISSING $pkg"
 done
 if [ -n "$MISSING" ]; then
@@ -73,7 +79,18 @@ if [ -n "$MISSING" ]; then
 	echo "       拒绝继续构建。" >&2
 	exit 1
 fi
-echo "==> .config 校验通过：18 个集成包全部启用"
+
+UNWANTED=""
+for pkg in $MUST_NOT_HAVE; do
+	grep -q "^CONFIG_PACKAGE_${pkg}=y" .config && UNWANTED="$UNWANTED $pkg"
+done
+if [ -n "$UNWANTED" ]; then
+	echo "ERROR: 以下包本应被移除，却仍然启用：$UNWANTED" >&2
+	echo "       多半是旧 .config 没重新生成 —— 删掉 .config 再跑一次。" >&2
+	exit 1
+fi
+
+echo "==> .config 校验通过：$(echo $MUST_HAVE | wc -w) 个必需包已启用，$(echo $MUST_NOT_HAVE | wc -w) 个排除包确认未启用"
 
 # --- 4. 构建 ----------------------------------------------------------------
 echo "==> 下载源码"

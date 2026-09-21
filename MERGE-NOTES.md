@@ -48,7 +48,7 @@
 
 `feeds.conf.default` 里原有的六个 feed 保持不变（只把上游 OpenWrt 那四个从
 `git.openwrt.org` 改写成官方 GitHub 镜像，**提交 pin 一字未动** —— 本机到
-`git.openwrt.org` 实测只有约 1 MB/min）。新增六个：
+`git.openwrt.org` 实测只有约 1 MB/min）。新增七个：
 
 ```conf
 src-git istore     https://github.com/linkease/istore.git;main              # iStore 商店
@@ -57,8 +57,10 @@ src-git nas_luci   https://github.com/linkease/nas-packages-luci.git;main   # lu
 src-git istoreapps https://github.com/linkease/openwrt-apps.git;main        # mergerfs / luci-app-mergerfs
 src-git third      https://github.com/jjm2473/openwrt-third.git;main        # luci-app-nfs
 src-git diskman    https://github.com/lisaac/luci-app-diskman.git;master    # luci-app-diskman
+src-git mosdns     https://github.com/sbwml/luci-app-mosdns.git;v5          # mosdns + luci-app-mosdns
 ```
 
+`mosdns` 上游（官方 packages feed）早已移除，这里用社区维护的 v5 分支。
 前三个与 iStoreOS 自己 `feeds.conf.default` 以及 `linkease/openwrt-app-actions/feeds.conf`
 完全一致。`istoreapps` / `third` / `diskman` 是补上 iStoreOS 官方 x86 固件里有、
 但不在上面三个 feed 里的几个包（见第 5 节的来源考证）。
@@ -84,8 +86,8 @@ luci-app-diskman    (diskman)  ── parted + e2fsprogs + smartmontools + ...
 
 ### 4.1 `include/target.mk`
 
-在 `DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))` 之后新增一个
-`ifneq ($(filter x86_64,$(ARCH)),)` 块，把 11 个包加进默认包（其余由依赖带出）。
+分两块。第一块在 `DEFAULT_PACKAGES += $(DEFAULT_PACKAGES.$(DEVICE_TYPE))` 之后，
+用 `ifneq ($(filter x86_64,$(ARCH)),)` 圈定本项目**额外要**的 13 个包（其余由依赖带出）。
 
 **`xz-utils` 不是可选项。** `luci-app-store` 依赖 `tar`，而 `tar` 的 `PACKAGE_TAR_XZ`
 （默认 `y`）会在依赖者身上展开成一条 Kconfig 约束：
@@ -99,6 +101,34 @@ depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
 `.config` 里连 `# ... is not set` 都不会写出来。不选 `xz-utils` 就会得到这个
 极难排查的现象。
 
+第二块声明本项目**明确不要**的包：
+
+```make
+DEFAULT_PACKAGES += \
+	-luci-app-ddns \
+	-luci-app-hd-idle \
+	-luci-app-samba4 \
+	-luci-app-uhttpd \
+	-luci-app-upnp \
+	-luci-app-wol
+```
+
+`-包名` 是 OpenWrt 原生支持的移除语法 —— `scripts/target-metadata.pl` 的
+`merge_package_lists()` 会把 `pkg` 与 `-pkg` 一并消掉。**这样就不必去改
+FanchmWrt 原有的 `DEFAULT_PACKAGES.router`**：上游清单保持原样，本项目动了
+哪些包全部集中在这一处，review 时一眼可见。
+
+有两个包名看着像"删本体"，其实只是删界面，这里特意写明：
+
+| 移除的包 | 本体 | 为什么本体还在 |
+|---|---|---|
+| `luci-app-uhttpd` | `uhttpd` + `uhttpd-mod-ubus` | 由 `luci-light`（→ `luci` 集合）依赖，Web 管理界面不受影响 |
+| `luci-app-samba4` | `samba4-server` | 由 `unishare` 依赖；SMB 服务与数据照常，只是没有 LuCI 配置入口 |
+
+> 如果不做这层区分、直接删 `luci-app-uhttpd` 就以为"去掉了一个界面"，
+> 实际上会**连整个 LuCI 一起失去**——前提是 `uhttpd` 当时没有别的依赖来源。
+> 本树里 `luci` 集合救了它，但这个依赖关系值得记一笔。
+
 ### 4.2 `feeds.conf.default`
 
 见第 3 节。
@@ -108,14 +138,56 @@ depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils
 
 ### 4.3 `merge-patches/` + `scripts/istoreos-merge.sh`
 
-两个定点补丁，由脚本幂等地打到 feed 检出上，挂在顶层 `Makefile` 的 `fwx_init`
+三个定点补丁，由脚本幂等地打到 feed 检出上，挂在顶层 `Makefile` 的 `fwx_init`
 （`prereq` 的前置）里，因此每次 `make` 都会重新确认。
+
+| 补丁 | 目标 | 作用 |
+|---|---|---|
+| `0001-dockerd-istoreos.patch` | `feeds/packages/utils/dockerd` | iStoreOS 对 dockerd 的全部定制 |
+| `0002-quickstart-menu-order.patch` | `feeds/nas_luci` | QuickStart 菜单序号 1 → 2，让首页稳定落在仪表盘 |
+| `0003-v2ray-geodata-rolling-releases.patch` | `feeds/packages` | geoip/geosite 改用滚动 release 地址 |
 
 **刻意不用 `feeds_patches/`**：那套机制是 `cp -fr` 整文件覆盖，一旦上游随后修了
 同一个文件，旧副本会把上游修复**静默回退**掉。这里用定点补丁，只改目标那几行；
 若上游挪动了锚点，脚本会**显式报错中止**，而不是产出一份错误的固件。
 
 正向 / 反向各试一次 dry-run 来判断是否已应用；两边都不匹配就报错退出。
+
+#### 4.3.1 为什么需要 `0003-v2ray-geodata-rolling-releases.patch`
+
+`mosdns` 本身不含规则数据，它的 LuCI 界面硬依赖 `v2ray-geoip` / `v2ray-geosite`
+两个数据包（`LUCI_DEPENDS:=+mosdns +uclient-fetch +v2ray-geoip +v2ray-geosite +geo2txt +ucode`）。
+而 `v2ray-geodata` 不编译任何代码，只在 `Build/Prepare` 阶段下载两个 `.dat` 文件。
+
+问题在于上游的分发方式：
+
+| 仓库 | 发布节奏 | 保留窗口 |
+|---|---|---|
+| `v2fly/geoip` | 滚动 | 约一年 |
+| `v2fly/domain-list-community` | 每几小时一版 | **约三个月**（实测 571 个 release） |
+
+packages feed 里 pin 的是 `GEOSITE_VER:=20260326050832`，**这个 tag 已经被上游删掉**，
+下载直接 404，构建在这里失败：
+
+```
+curl: (22) The requested URL returned error: 404
+https://github.com/v2fly/domain-list-community/releases/download/20260326050832/dlc.dat
+```
+
+也就是说「pin 死日期版本」这种常规做法在这两个仓库上**必然腐烂**，只是时间问题。
+
+补丁改成 `releases/latest/download/` —— 这个地址永远指向最新 release，不会失效。
+随之而来的两个约束：
+
+1. **版本号不能再写 `latest`**。`VERSION:=$(GEOIP_VER)-r$(PKG_RELEASE)` 会变成
+   `latest-r1`，而 `apk mkpkg` 要求版本号数字开头，会直接报
+   `package version is invalid`。所以固定写成 `1`。
+2. **放弃哈希校验**（`HASH:=skip`）。`scripts/download.pl` 第 159 行原生支持这个值。
+   代价是这两个数据文件不再验签；它们是 DNS 分流规则数据、不参与编译，
+   且走 HTTPS 从 GitHub 拉取，这里认为可接受。
+
+下载缓存文件名也固定成 `geoip.dat.rolling` / `dlc.dat.rolling`，好处是同一个构建树里
+不会反复下载 20+ MB 数据；要刷新数据就删掉这两个文件。
 
 ### 4.4 `package/istoreos-merge/`
 
@@ -284,25 +356,27 @@ export CURL_OPTIONS="--speed-limit 51200 --speed-time 60"
 
 | 镜像 | 大小 | 说明 |
 |---|---|---|
-| `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 124 MB | **推荐**：squashfs + EFI，支持恢复出厂 |
-| `openwrt-x86-64-generic-squashfs-combined.img.gz` | 124 MB | squashfs + BIOS 引导 |
-| `openwrt-x86-64-generic-ext4-combined-efi.img.gz` | 156 MB | ext4 + EFI |
-| `openwrt-x86-64-generic-ext4-combined.img.gz` | 156 MB | ext4 + BIOS 引导 |
-| `openwrt-x86-64-generic-targz-combined-efi.img.gz` | 155 MB | targz + EFI |
-| `openwrt-x86-64-generic-rootfs.tar.gz` | 148 MB | rootfs 内容（便于免刷机核验） |
+| `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 131 MB | **推荐**：squashfs + EFI，支持恢复出厂 |
+| `openwrt-x86-64-generic-squashfs-combined.img.gz` | 131 MB | squashfs + BIOS 引导 |
+| `openwrt-x86-64-generic-ext4-combined-efi.img.gz` | 166 MB | ext4 + EFI |
+| `openwrt-x86-64-generic-ext4-combined.img.gz` | 166 MB | ext4 + BIOS 引导 |
+| `openwrt-x86-64-generic-targz-combined-efi.img.gz` | 166 MB | targz + EFI |
+| `openwrt-x86-64-generic-rootfs.tar.gz` | 160 MB | rootfs 内容（便于免刷机核验） |
 
 镜像比 fanchmwrt 原版大很多，主要是 `containerd`（Docker 运行时）、`samba4`、
-`nfs-kernel-server`、`ntfs-3g`/`btrfs-progs`/`smartmontools`（DiskMan 依赖）
-这几块。rootfs 分区在 `CONFIG_TARGET_ROOTFS_PARTSIZE=1024`（1 GB），
+`nfs-kernel-server`、`ntfs-3g`/`btrfs-progs`/`smartmontools`（DiskMan 依赖），
+以及 `geoip.dat` / `geosite.dat` 两份 DNS 分流规则数据（合计约 5 MB 压缩后）。rootfs 分区在 `CONFIG_TARGET_ROOTFS_PARTSIZE=1024`（1 GB），
 并已由 fanchmwrt 的 `fwx_init` 自动置 `EXPAND_ROOT=1`，首次启动会扩展分区。
 
 ### 9.2 集成验证
 
 `./scripts/verify-merged-firmware.sh` 直接从固件的 `rootfs.tar.gz` 与
-`.manifest` 校验，**107 项全部通过、0 失败**，覆盖：
+`.manifest` 校验，**131 项全部通过、0 失败**，覆盖：
 
 - **包清单**：fanchmwrt 侧（主题、fwx 全套 18 个应用 + `fwxd` + `kmod-fwx`）、
-  iStoreOS 侧（面板 / Docker / iStore）、磁盘与共享套件，共 40+ 个关键包
+  iStoreOS 侧（面板 / Docker / iStore）、磁盘与共享套件、DNS 与终端，共 50+ 个关键包
+- **反向校验**：逐个确认 ddns / hd-idle / wol / upnp / uhttpd 界面 / samba4 界面
+  这 6 个包**确实不在固件里**，同时确认 `uhttpd` 与 `samba4-server` 的本体仍在
 - **主题改动**：两个新图标、`.menu-icon-store` / `.menu-icon-quickstart`、
   菜单归类、图标映射
 - **首页归属**：`fwx_dashboard` 的 order 为 1，`quickstart` 的 menu.d 为 2
@@ -323,19 +397,27 @@ luci-app-dockerman       26.133.20346~e9ebca7
 dockerd                  27.3.1-r5       docker   27.3.1-r2   docker-compose 2.40.3-r1
 luci-app-store           0.2.1-r1        taskd    1.0.3-r2
 luci-app-diskman         0.2.13-r1
-luci-app-nfs             1.2.0-r1        luci-app-samba4  26.133.20346~e9ebca7
+luci-app-mosdns          1.7.14-r1       mosdns   5.3.4-r14   geo2txt 1.0.0-r1
+v2ray-geoip              1-r1            v2ray-geosite 1-r1     （滚动数据，见 4.3.1）
+luci-app-ttyd            26.133.20346~e9ebca7                     ttyd 1.7.7-r1
+luci-app-nfs             1.2.0-r1        samba4-server 4.22.7-r3
 luci-app-mergerfs        1.0.3-r1        mergerfs 2.40.2-r5
 luci-app-unishare        1.0.2-r1        unishare 1.1.2-r1  webdav2 4.3.2-r1
 wsdd2                    2023.12.21~b676d8ac-r2
 istoreos-merge           1.0-r1
 ```
 
-清单里共 515 个包。
+已确认**不在**清单里的包：`luci-app-ddns`、`luci-app-hd-idle`、`luci-app-wol`、
+`luci-app-upnp`、`luci-app-uhttpd`、`luci-app-samba4`（及其连带拉入的
+`ddns-scripts`、`miniupnpd-nftables`、`etherwake` 等）。
+`uhttpd` / `uhttpd-mod-ubus` / `samba4-server` 本体仍在。
+
+清单里共 504 个包。
 
 ### 9.3 复现用的 feed 提交
 
 `bin/targets/x86/64/feeds.buildinfo` 记录了本次构建实际用到的提交。
-新增的六个 feed 当时都在分支 HEAD 上，建议按需 pin：
+新增的七个 feed 当时都在分支 HEAD 上，建议按需 pin：
 
 ```
 istore      3fca15b30aeed9ecacb3efc8b4a8b9c2584ad5c7
@@ -344,7 +426,12 @@ nas_luci    7eac499c8983d814c36dc87785aabfc630c66716
 istoreapps  e2e8e742f5ce3265445d0540dae2fa4c60976db5
 third       335fa421e0fcd673a78986117981d4dfa3bf57d7
 diskman     c20df1d4f40d86e32fd919f33122b2a48f8a99b4
+mosdns      bd40245303cd0ba56804d49eed5dbc4be2a082ca
 ```
+
+> `mosdns` 这个 feed 尤其建议 pin：它的 `v5` 是分支，而上游
+> `v2fly/domain-list-community` 的数据 tag 每三个月轮换一次，
+> 固定住 feed 提交能让「除了数据之外」的部分保持可复现。
 
 （`fanchmwrt` feed 本身也记在 `feeds.buildinfo` 里：`75c3c55e1d…`。）
 

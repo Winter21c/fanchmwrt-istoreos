@@ -1,0 +1,48 @@
+--- a/net/v2ray-geodata/Makefile
++++ b/net/v2ray-geodata/Makefile
+@@ -12,22 +12,37 @@
+ 
+ include $(INCLUDE_DIR)/package.mk
+ 
+-GEOIP_VER:=202603050223
+-GEOIP_FILE:=geoip.dat.$(GEOIP_VER)
++#
++# 上游 v2fly 的两个数据仓库都是「滚动发布 + 定期删除旧 tag」：
++#   v2fly/geoip                   保留约一年
++#   v2fly/domain-list-community   只保留约三个月
++# 原文件 pin 的 20260326050832 已经 404，构建会直接卡死在这里。改用
++# releases/latest/download —— 该地址永远指向最新 release，不会失效。
++#
++# 因为地址固定成了 latest，版本号不再跟随上游 tag（apk 只接受数字开头的
++# 版本号，写 "latest" 会被 apk mkpkg 拒绝），所以这里固定为 1。
++# 下载缓存文件名也跟着固定，好处是同一个构建树里不会反复下载 20+MB 数据；
++# 想要刷新数据就删掉 dl/geoip.dat.rolling 与 dl/dlc.dat.rolling。
++#
++# 代价：这两个数据文件不再校验哈希（HASH:=skip），内容随上游滚动。
++# 它们只是 DNS 分流规则数据，不参与编译，不影响其它包。
++#
++GEOIP_VER:=1
++GEOIP_FILE:=geoip.dat.rolling
+ define Download/geoip
+-  URL:=https://github.com/v2fly/geoip/releases/download/$(GEOIP_VER)/
++  URL:=https://github.com/v2fly/geoip/releases/latest/download/
+   URL_FILE:=geoip.dat
+   FILE:=$(GEOIP_FILE)
+-  HASH:=c6c1d1be0d28defef55b153e87cb430f94fb480c8f523bf901c5e4ca18d58a00
++  HASH:=skip
+ endef
+ 
+-GEOSITE_VER:=20260326050832
+-GEOSITE_FILE:=dlc.dat.$(GEOSITE_VER)
++GEOSITE_VER:=1
++GEOSITE_FILE:=dlc.dat.rolling
+ define Download/geosite
+-  URL:=https://github.com/v2fly/domain-list-community/releases/download/$(GEOSITE_VER)/
++  URL:=https://github.com/v2fly/domain-list-community/releases/latest/download/
+   URL_FILE:=dlc.dat
+   FILE:=$(GEOSITE_FILE)
+-  HASH:=cc743580e460591fcdcea805ec88ea18abcb150ff40484095278d5a074f587d3
++  HASH:=skip
+ endef
+ 
+ GEOSITE_IRAN_VER:=202603230100
