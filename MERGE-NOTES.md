@@ -588,11 +588,20 @@ key 只跟 `feeds.conf.default` 走：它变了才说明包来源变了。
 
 ### 11.3 额度的现实预期
 
-公开仓库的 Actions 不计费。单次构建在 4 核 runner 上约 2～3 小时，
-`timeout-minutes` 设为 350（GitHub 单 job 上限 360）。
+公开仓库的 Actions 不计费。`timeout-minutes` 设为 350（GitHub 单 job 上限 360）。
 
-跑满 6 小时的极端情况（比如 runner 特别慢、或 Go 包并发下载卡住）会超时失败，
-重跑一次通常就好了。
+**实测数据**（4 核 runner）：
+
+| 配置 | 耗时 |
+|---|---|
+| 关闭 Docker（`enable_docker=false`） | **110 分钟** |
+| 开启 Docker | 更长 —— dockerd / containerd / docker-compose 三个 Go 包是重头 |
+
+即使按最坏情况估算也留有充足余量。真跑满 6 小时（比如 runner 特别慢、
+或 Go 模块下载卡住）会超时失败，重跑一次通常就好。
+
+`fetch-depth: 1` 与 `dl/` 缓存的收益在这些数字里已经体现：
+准备 + 下载阶段合计只占十几分钟，其余全是编译。
 
 ---
 
@@ -671,3 +680,23 @@ GitHub 表达式里 `false` 是假值，`false || '1'` 会得到 `'1'` ——
 正确做法是直接传输入原值（`${{ inputs.enable_docker }}`），
 push 触发时它渲染为空字符串，由脚本自己判定「空 = 用默认」。
 语义单一，也不会踩这个坑。
+
+### 12.6 CI 实测验证记录
+
+用 `lan_ip=192.168.100.1` + `rootfs_size=2048` + `enable_docker=false`
+在 GitHub Actions 上跑通了一次完整构建（run `35578434536`，110 分钟）：
+
+- 准备阶段日志确认参数生效：`管理地址：192.168.100.1/24`、
+  `rootfs 分区：2048 MB`、`Docker：不含`、`已删除 tmp/（Kconfig 元数据缓存）`
+- 核验阶段 **126 项通过、0 失败**，其中：
+  - `luci-app-dockerman` / `dockerd` / `docker` / `docker-compose` /
+    `containerd` / `runc` / `istoreos-merge` 逐个确认**不在固件里**
+  - `ttyd 未受 Docker 关闭影响（luci-app-ttyd 自带 +ttyd 依赖）`
+  - `管理地址 uci-defaults 已打包（192.168.100.1/24）`、
+    `用 add_list 写入（与 config_generate 的 list 形式一致）`、
+    `地址值与构建参数一致`
+- 产物 547 MB（关掉 Docker 后比含 Docker 的 1.49 GB 小很多）
+
+第一次跑（run `35577305339`）在准备阶段就失败，暴露了 12.4 节那个
+「首次生成复用过期元数据」的问题 —— 这正是坚持在 CI 上真跑一次的价值：
+本地三种复现方式都是绿的，只有真实 CI 环境能把它逼出来。
