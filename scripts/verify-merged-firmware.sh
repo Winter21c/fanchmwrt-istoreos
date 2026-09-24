@@ -216,11 +216,25 @@ else
 	f /www/luci-static/resources/menu-fanchmwrt.js      "主题菜单 JS"
 	gE /www/luci-static/resources/menu-fanchmwrt.js "'store'[[:space:]]*:[[:space:]]*'store'" "菜单图标映射含 store（压缩后）"
 	gE /www/luci-static/resources/menu-fanchmwrt.js "'quickstart'[[:space:]]*:[[:space:]]*'quickstart'" "菜单图标映射含 quickstart（压缩后）"
-	gE /www/luci-static/resources/menu-fanchmwrt.js "normalizedName==='store'" "菜单归类含 store"
-	gE /www/luci-static/resources/menu-fanchmwrt.js "normalizedName==='quickstart'" "菜单归类含 quickstart"
 	g /www/luci-static/fanchmwrt/cascade.css ".menu-icon-store:before"     "CSS 含 .menu-icon-store"
 	g /www/luci-static/fanchmwrt/cascade.css ".menu-icon-quickstart:before" "CSS 含 .menu-icon-quickstart"
 	f /etc/uci-defaults/31_luci-theme-fanchmwrt        "主题默认项（默认主题=fanchmwrt）"
+
+	# 菜单归类：只有 fwx* 进「普通模式」，其余（含 store / quickstart）一律高级模式。
+	#
+	# 这一条曾经写成「store / quickstart 应被特判进普通模式」——那是错的：
+	# render() 会用当前页面所属分类去 switchCategory()，也就是点哪个页面、
+	# 整个菜单就切到那个分类。它们若归普通模式，人在高级模式点一下 iStore，
+	# 菜单会整体跳回普通模式。所以这里要断言的是**没有**特判。
+	gE /www/luci-static/resources/menu-fanchmwrt.js "startsWith\('fwx'\)" "菜单归类：fwx* 进普通模式"
+	for name in store quickstart; do
+		if grep -qE "normalizedName[[:space:]]*===[[:space:]]*'$name'" \
+			"$R/www/luci-static/resources/menu-fanchmwrt.js" 2>/dev/null; then
+			bad "$name 被特判（它应当落在默认分支＝高级模式）"
+		else
+			ok "$name 未被特判，归高级模式"
+		fi
+	done
 
 	head_ "fanchmwrt 侧：fwx 服务"
 	f /usr/lib/lua/luci/controller/fwx_dashboard.lua   "仪表盘 controller"
