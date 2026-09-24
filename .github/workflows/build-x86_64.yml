@@ -47,6 +47,26 @@ on:
     tags:
       - 'v*'
 
+  # ---------------------------------------------------------------------------
+  # 每天定时构建并发布
+  #
+  # ⚠️ GitHub Actions 的 cron **一律按 UTC** 解释，与仓库或 runner 的时区无关。
+  #    所以这里不能写 '0 2 * * *' —— 那是北京时间上午 10 点。
+  #    18:00 UTC = 次日 02:00（UTC+8），这才是想要的「凌晨 2 点」。
+  #
+  # 定时构建的参数是固定的（见下面「确定构建参数」一步）：
+  #   管理地址 192.168.100.1 ｜ rootfs 2048 MB ｜ 含 Docker
+  #
+  # 关于发布标签：定时构建用固定的滚动标签 daily，也就是说每天**替换**
+  # 同一个 Release，而不是新开一个。否则一年下来会积压 365 个 Release、
+  # 每个几百 MB，releases 页面基本没法看。想保留每日历史的话，把下面
+  # 「确定 Release 标签」里的 daily 换成按日期生成的标签即可。
+  #
+  # 想让构建只在特定分支上跑，可以加 branches: [main]。
+  # ---------------------------------------------------------------------------
+  schedule:
+    - cron: '0 18 * * *'
+
 # 创建 Release 需要写权限；读取代码只需要读权限。
 permissions:
   contents: write
@@ -61,14 +81,21 @@ jobs:
     # 任务名里带上参数，这样运行列表一眼就能看出这次编的是什么配置 ——
     # 排查时不用点进去、也不用等日志（运行中的日志在 API 上是读不到的）。
     #
-    # Docker 那一项要用 format() 包一层：直接写 `inputs.enable_docker || 'true'`
-    # 会在用户**取消勾选**时得到 'true'（false 是假值，会走 || 的右半边），
-    # 显示成与事实相反的「含 Docker」。format('{0}', false) 得到字符串 "false",
-    # 是真值，就不会被 || 吃掉。
+    # 两个坑：
+    #   1. 定时触发时 inputs.* 全是空的，所以要用 `event == 'schedule' && 固定值 || ...`
+    #      把定时构建的实际参数显示出来，否则会显示成 |默认值、与实际相反。
+    #   2. Docker 那一项要用 format() 包一层：直接写 `inputs.enable_docker || 'true'`
+    #      会在用户**取消勾选**时得到 'true'（false 是假值，会走 || 的右半边），
+    #      显示成与事实相反的「含 Docker」。format('{0}', false) 得到字符串 "false",
+    #      是真值，就不会被 || 吃掉。
     name: >-
-      编译 x86_64 · LAN=${{ inputs.lan_ip || '192.168.1.1' }} ·
-      分区=${{ inputs.rootfs_size || '1024' }}MB ·
-      Docker=${{ format('{0}', inputs.enable_docker) || 'true' }}
+      编译 x86_64 · LAN=${{
+        github.event_name == 'schedule' && '192.168.100.1' || inputs.lan_ip || '192.168.1.1'
+      }} · 分区=${{
+        github.event_name == 'schedule' && '2048' || inputs.rootfs_size || '1024'
+      }}MB · Docker=${{
+        github.event_name == 'schedule' && 'true' || format('{0}', inputs.enable_docker) || 'true'
+      }}
     runs-on: ubuntu-24.04
     # GitHub 单个 job 上限是 360 分钟。整棵 OpenWrt 在 4 核 runner 上
     # 大约 2～3 小时，这里留出余量但不超过上限。
@@ -79,19 +106,47 @@ jobs:
       # runner 在境外，但上游仍可能有个别镜像很慢，保留这个下限让它自动换源。
       CURL_OPTIONS: --speed-limit 51200 --speed-time 60
 
-      # ---- 构建参数 --------------------------------------------------------
-      # 由 scripts/apply-build-options.sh 消费，落成源码树里的改动。
-      #
-      # 注意：这里**不能**写成 `${{ inputs.x || 'default' }}`。
-      # 对 boolean 输入，false 在 GitHub 表达式里是「假值」，`false || '1'`
-      # 会得到 '1' —— 也就是说用户勾掉了 Docker，却仍然编进固件。
-      # 所以直接传输入原值：push 触发时 inputs 为空字符串，
-      # 由脚本自己判定「空 = 用默认」，语义单一且不会踩这个坑。
-      LAN_IP: ${{ inputs.lan_ip }}
-      ROOTFS_PARTSIZE: ${{ inputs.rootfs_size }}
-      ENABLE_DOCKER: ${{ inputs.enable_docker }}
+      # 三个构建参数（LAN_IP / ROOTFS_PARTSIZE / ENABLE_DOCKER）不在这里设，
+      # 而是由下面「确定构建参数」一步写进 $GITHUB_ENV。原因是定时触发时
+      # inputs.* 全是空的，需要按事件类型给不同的值；写在同一步里语义更清楚，
+      # 也不必纠结 job 级 env 与 $GITHUB_ENV 谁优先。
 
     steps:
+      # ---------------------------------------------------------------------
+      # 构建参数的唯一来源。
+      #
+      # 手动触发：用工作流输入（空字符串交给 apply-build-options.sh 判为默认）
+      # 定时触发：用固定值 —— 192.168.100.1 / 2048 MB / 含 Docker
+      #
+      # 注意这里仍然不能写 `inputs.x || 'default'`：boolean 的 false 是假值，
+      # `false || 'true'` 会得到 'true'，用户取消了勾选却仍然编进 Docker。
+      - name: 确定构建参数
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            echo "定时构建：使用固定参数"
+            LAN_IP_VALUE="192.168.100.1"
+            ROOTFS_VALUE="2048"
+            DOCKER_VALUE="1"
+          else
+            LAN_IP_VALUE="${{ inputs.lan_ip }}"
+            ROOTFS_VALUE="${{ inputs.rootfs_size }}"
+            DOCKER_VALUE="${{ inputs.enable_docker }}"
+          fi
+
+          {
+            echo "LAN_IP=$LAN_IP_VALUE"
+            echo "ROOTFS_PARTSIZE=$ROOTFS_VALUE"
+            echo "ENABLE_DOCKER=$DOCKER_VALUE"
+          } >> "$GITHUB_ENV"
+
+          # 必须打印上面那几个局部变量，不能打印 $LAN_IP ——
+          # 写进 $GITHUB_ENV 的值要到**下一个** step 才生效，
+          # 在本 step 里读只会拿到空值，打出误导性的「用默认」。
+          echo "本次构建参数（空值表示交给脚本取默认）："
+          echo "  LAN_IP          = ${LAN_IP_VALUE:-（空 → 默认 192.168.1.1）}"
+          echo "  ROOTFS_PARTSIZE = ${ROOTFS_VALUE:-（空 → 默认 1024）}"
+          echo "  ENABLE_DOCKER   = ${DOCKER_VALUE:-（空 → 默认包含）}"
+
       # ---------------------------------------------------------------------
       - name: 检出代码
         uses: actions/checkout@v4
@@ -248,10 +303,16 @@ jobs:
       # ---------------------------------------------------------------------
       - name: 确定 Release 标签
         id: tag
-        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.create_release }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             TAG="${GITHUB_REF_NAME}"
+          elif [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            # 定时构建用固定的滚动标签：每天**替换**同一个 Release，
+            # 而不是新开一个。否则一年积压 365 个 Release、每个几百 MB。
+            # 想保留每日历史就把这里换成按日期生成的标签，例如
+            #   TAG="daily-$(date -u +%Y%m%d)"
+            TAG="daily"
           else
             TAG="${{ inputs.release_tag }}"
             [ -n "$TAG" ] || TAG="$(date -u +%Y%m%d-%H%M)-istoreos"
@@ -268,7 +329,7 @@ jobs:
           echo "将使用标签：$TAG"
 
       - name: 生成 Release 说明
-        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.create_release }}
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           PKGCOUNT: ${{ steps.summary.outputs.pkgcount }}
@@ -315,7 +376,7 @@ jobs:
           head -30 /tmp/release-notes.md
 
       - name: 创建或更新 Release
-        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || inputs.create_release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
