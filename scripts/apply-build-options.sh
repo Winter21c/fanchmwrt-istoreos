@@ -195,18 +195,41 @@ EOF
 say "已生成 $FILES_DIR/etc/build-options"
 
 # ---------------------------------------------------------------------------
-# 4. 如果 .config 已存在，同步分区大小
+# 4. 如果 .config 已存在，同步与「出哪些镜像」相关的几项
 #
-# 没有 .config 时由 build-merged-x86_64.sh 的种子负责写入。
-# 只改这一行，不动其它任何配置。
+# 没有 .config 时由 build-merged-x86_64.sh 的种子负责写入；
+# 这一节管的是「已经有 .config 又改了参数」的情况，避免陈旧值残留。
+# 只动下面列出的这几行，不碰其它配置。
+#
+# 镜像策略：只出 squashfs / ext4 各两种（efi 与非 efi）共 4 个。
+#   * TARGZ 关掉 —— 它同时控制 -targz-* 三个镜像和 rootfs.tar.gz
+#     （见 include/image.mk 的 fs-types-$(CONFIG_TARGET_ROOTFS_TARGZ)）
+#   * squashfs 与 ext4 都打开 —— 它们是上面那 4 个镜像的来源
+# 注意 -rootfs.img.gz 两个是 x86 的 IMAGES-y 无条件产出的，
+# 没有开关可关；它们不会进 Release，只留在 bin/ 里。
 # ---------------------------------------------------------------------------
 if [ -f "$TOPDIR/.config" ]; then
+	set_config() {
+		# set_config <CONFIG_项> <y|n>
+		key="$1"; want="$2"
+		if [ "$want" = "y" ]; then
+			sed -i "/^${key}=/d; /^# ${key} is not set$/d" "$TOPDIR/.config"
+			printf '%s=y\n' "$key" >> "$TOPDIR/.config"
+		else
+			sed -i "/^${key}=/d; /^# ${key} is not set$/d" "$TOPDIR/.config"
+			printf '# %s is not set\n' "$key" >> "$TOPDIR/.config"
+		fi
+	}
+
 	CUR="$(sed -n 's/^CONFIG_TARGET_ROOTFS_PARTSIZE="\?\([0-9]*\)"\?$/\1/p' "$TOPDIR/.config" | head -1)"
 	if [ "$CUR" != "$ROOTFS_PARTSIZE" ]; then
-		sed -i '/^CONFIG_TARGET_ROOTFS_PARTSIZE=/d' "$TOPDIR/.config"
-		printf 'CONFIG_TARGET_ROOTFS_PARTSIZE=%s\n' "$ROOTFS_PARTSIZE" >> "$TOPDIR/.config"
+		set_config CONFIG_TARGET_ROOTFS_PARTSIZE "$ROOTFS_PARTSIZE"
 		say "已更新现有 .config 的分区大小：${CUR:-未设置} -> ${ROOTFS_PARTSIZE}"
 	fi
+
+	set_config CONFIG_TARGET_ROOTFS_SQUASHFS y
+	set_config CONFIG_TARGET_ROOTFS_EXT4FS y
+	set_config CONFIG_TARGET_ROOTFS_TARGZ n
 fi
 
 # ---------------------------------------------------------------------------

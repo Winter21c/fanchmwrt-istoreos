@@ -94,7 +94,10 @@ iStoreOS 强在**应用侧**：一个开箱即用的首页面板、图形化 Doc
 | `…squashfs-combined.img.gz` | 131 MB | 传统 BIOS 启动，同样支持恢复出厂 |
 | `…ext4-combined-efi.img.gz` | 166 MB | UEFI 启动，ext4 根文件系统，想随意改系统文件时用 |
 | `…ext4-combined.img.gz` | 166 MB | 传统 BIOS + ext4 |
-| `…rootfs.tar.gz` | 160 MB | 只想看/提取文件内容，不刷机 |
+| `sha256sums` | 2 KB | 校验用 |
+
+每次发布**只出这 4 个镜像**（squashfs / ext4 各含 efi 与非 efi）。
+`targz` 与 `rootfs.tar.gz` 在构建配置里已关掉。
 
 > **UEFI 还是 BIOS？** 近十年的机器基本都是 UEFI，选带 `efi` 的那个。
 > 拿不准就先试 `squashfs-combined-efi`，起不来再换不带 `efi` 的。

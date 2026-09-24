@@ -306,15 +306,18 @@ return baseclass.extend({
 
 	// 哪些顶级菜单进「普通模式」。
 	//
-	// 原版只认 fwx* —— 那是 fanchmwrt 自己的菜单。本固件另外集成了 iStoreOS
-	// 的 iStore 商店与 QuickStart 面板，它们是这次合并的招牌功能；不放进普通
-	// 模式的话，默认视图里这两个菜单根本看不到（会被归到高级模式）。
+	// 只有 fanchmwrt 自己的 fwx* 菜单进普通模式，其余（含 iStore 商店
+	// 与 QuickStart 面板）一律归高级模式。
+	//
+	// 这里曾经把 store / quickstart 也放进普通模式，以为这样能让它们在
+	// 默认视图里可见 —— 那是错的，而且会造成一个很别扭的现象：
+	// render() 会用「当前页面所属的分类」去调 switchCategory()，
+	// 也就是**点哪个页面，整个菜单就切到那个分类**。
+	// 于是人在高级模式下点一下 iStore，整个菜单会突然跳回普通模式、
+	// 把所有高级菜单藏起来。归到高级模式就没有这个问题。
 	getMenuCategory(menuName) {
 		const normalizedName = (menuName || '').toLowerCase();
 		if (normalizedName.startsWith('fwx')) {
-			return 'menu-item-basic';
-		}
-		if (normalizedName === 'store' || normalizedName === 'quickstart') {
 			return 'menu-item-basic';
 		}
 		return 'menu-item-advanced';

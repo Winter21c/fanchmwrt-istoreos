@@ -143,15 +143,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 文件级核验需要一个「能解开的 rootfs」。优先用 rootfs.tar.gz；
+# 本项目为了只出 4 个镜像把 TARGZ 关掉了（连带没有 rootfs.tar.gz），
+# 这时退回到 squashfs-rootfs.img.gz —— 它由 x86 的 IMAGES-y 无条件产出，
+# 而且解出来的文件清单与 rootfs.tar.gz 逐一对得上（已实测 2760/2760 一致）。
+if [ -z "$ROOTFS" ]; then
+	SQUASHFS_ROOTFS="$(ls -1 "$OUT"/*-squashfs-rootfs.img.gz 2>/dev/null | head -1)"
+	if [ -n "$SQUASHFS_ROOTFS" ]; then
+		ROOTFS="$SQUASHFS_ROOTFS"
+		ROOTFS_KIND="squashfs"
+	fi
+fi
+
 if [ -z "$ROOTFS" ]; then
 	head_ "文件级核验"
-	skip "没有 rootfs.tar.gz，跳过文件级核验"
+	skip "既没有 rootfs.tar.gz 也没有 squashfs-rootfs.img.gz，跳过文件级核验"
 else
-	head_ "解开 rootfs 做文件级核验"
 	WORK="$(mktemp -d)"
 	trap 'rm -rf "$WORK"' EXIT
-	tar -xzf "$ROOTFS" -C "$WORK" 2>/dev/null || { echo "解包失败" >&2; exit 1; }
-	R="$WORK"
+
+	if [ "${ROOTFS_KIND:-tar}" = "squashfs" ]; then
+		head_ "从 squashfs-rootfs 镜像解出 rootfs 做文件级核验"
+		gunzip -c "$ROOTFS" > "$WORK/rootfs.squashfs" 2>/dev/null \
+			|| { echo "解压 $ROOTFS 失败" >&2; exit 1; }
+		# unsquashfs 对「squashfs 后面还跟着 pad-to 补的零」会返回 2，
+		# 但内容其实是完整的 —— 所以不看退出码，改用哨兵文件判断。
+		unsquashfs -q -d "$WORK/x" "$WORK/rootfs.squashfs" >/dev/null 2>&1
+		R="$WORK/x"
+		if [ ! -e "$R/bin/busybox" ] || [ ! -e "$R/etc/openwrt_release" ]; then
+			echo "从 squashfs 镜像解出的 rootfs 不完整（缺 busybox 或 openwrt_release）" >&2
+			exit 1
+		fi
+		rm -f "$WORK/rootfs.squashfs"
+	else
+		head_ "解开 rootfs.tar.gz 做文件级核验"
+		mkdir -p "$WORK/x"
+		tar -xzf "$ROOTFS" -C "$WORK/x" 2>/dev/null || { echo "解包失败" >&2; exit 1; }
+		R="$WORK/x"
+	fi
 
 	# f <路径> <说明>
 	f() {

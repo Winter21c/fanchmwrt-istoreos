@@ -207,7 +207,10 @@ jobs:
             echo ""
             echo "| 镜像 | 大小 |"
             echo "|---|---|"
-            for f in bin/targets/x86/64/*.img.gz bin/targets/x86/64/*rootfs.tar.gz; do
+            for f in bin/targets/x86/64/*-squashfs-combined-efi.img.gz \
+                     bin/targets/x86/64/*-squashfs-combined.img.gz \
+                     bin/targets/x86/64/*-ext4-combined-efi.img.gz \
+                     bin/targets/x86/64/*-ext4-combined.img.gz; do
               [ -e "$f" ] || continue
               printf '| `%s` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
             done
@@ -219,12 +222,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fanchmwrt-istoreos-x86_64
+          # 只出 4 个镜像：squashfs / ext4 各含 efi 与非 efi。
+          # TARGZ 已在 .config 里关掉，所以不会有 -targz-*；
+          # x86 的 -rootfs.img.gz 是无条件产出的、没有开关可关，
+          # 这里靠路径精确匹配把它们排除在外。
           path: |
-            bin/targets/x86/64/*.img.gz
-            bin/targets/x86/64/*rootfs.tar.gz
+            bin/targets/x86/64/*-squashfs-combined-efi.img.gz
+            bin/targets/x86/64/*-squashfs-combined.img.gz
+            bin/targets/x86/64/*-ext4-combined-efi.img.gz
+            bin/targets/x86/64/*-ext4-combined.img.gz
             bin/targets/x86/64/sha256sums
-            bin/targets/x86/64/*.manifest
-            bin/targets/x86/64/*.buildinfo
           if-no-files-found: error
           retention-days: 30
 
@@ -304,11 +311,27 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -e
+          # 只挂 4 个镜像 + 校验和。
+          # sha256sums 会覆盖 bin/ 下的全部产物（含没进 Release 的
+          # -rootfs.img.gz），拿它校验这 4 个镜像是没问题的。
           ASSETS=$(ls -1 \
-            bin/targets/x86/64/*.img.gz \
-            bin/targets/x86/64/*rootfs.tar.gz \
-            bin/targets/x86/64/sha256sums \
-            bin/targets/x86/64/*.manifest)
+            bin/targets/x86/64/*-squashfs-combined-efi.img.gz \
+            bin/targets/x86/64/*-squashfs-combined.img.gz \
+            bin/targets/x86/64/*-ext4-combined-efi.img.gz \
+            bin/targets/x86/64/*-ext4-combined.img.gz \
+            bin/targets/x86/64/sha256sums)
+
+          # 发布前兜底：确认恰好是 4 个镜像 + 1 个校验和。
+          # 镜像类型配置被改坏（比如 TARGZ 又被打开）时会在这一步暴露，
+          # 而不是稀里糊涂发一个多出好几个附件的 Release。
+          IMG_COUNT=$(printf '%s\n' $ASSETS | grep -c '\.img\.gz$' || true)
+          if [ "$IMG_COUNT" -ne 4 ]; then
+            echo "::error::期望 4 个镜像，实际找到 $IMG_COUNT 个："
+            printf '%s\n' $ASSETS
+            exit 1
+          fi
+          echo "将发布的附件："
+          printf '  %s\n' $ASSETS
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，改为覆盖附件"

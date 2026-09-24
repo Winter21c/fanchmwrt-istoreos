@@ -44,9 +44,10 @@ FanchmWrt 在没有 WAN 口时会自动进入**旁路模式**：
 | `…squashfs-combined.img.gz` | 传统 BIOS 启动，同样支持恢复出厂 |
 | `…ext4-combined-efi.img.gz` | UEFI 启动，ext4 根文件系统 |
 | `…ext4-combined.img.gz` | 传统 BIOS + ext4 |
-| `…targz-*.img.gz` | 归档格式，适合装到已有系统 |
-| `…rootfs.tar.gz` | 只看/提取文件内容，不刷机 |
-| `sha256sums` | 校验用 |
+| `sha256sums` | 校验用（覆盖 build 目录下的全部产物） |
+
+> 只出这 4 个镜像：squashfs / ext4 各含 efi 与非 efi。
+> `targz` 与 `rootfs.tar.gz` 已在构建配置里关掉。
 
 ```sh
 gunzip openwrt-x86-64-generic-squashfs-combined-efi.img.gz

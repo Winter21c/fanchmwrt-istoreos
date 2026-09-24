@@ -755,3 +755,83 @@ template="${template//@LANIP@/$OPT_LANIP_HOST}"
 
 **教训**：验证一个流程时，必须让它的每一条分支都真正跑到。
 `create_release=false` 的绿灯给了我一种「发布路径没问题」的错觉。
+
+---
+
+## 13. 两处调整（按使用反馈）
+
+### 13.1 store 与 quickstart 归回「高级模式」
+
+原来把 `store` / `quickstart` 放进「普通模式」，理由是「不这样的话默认视图里
+看不到这两个招牌菜单」。这个判断是错的，而且造成了一个很别扭的现象。
+
+机制在 `render()` 里：
+
+```js
+const category = L.env.dispatchpath[1]
+    ? (this.getMenuCategory(L.env.dispatchpath[1]) === 'menu-item-basic' ? 'basic' : 'advanced')
+    : localStorage.getItem('luci-menu-category') || 'basic';
+this.switchCategory(category);
+```
+
+**它用「当前页面所属的分类」去切换整个菜单**。于是人在高级模式下点一下
+iStore，整个菜单会突然跳回普通模式、把所有高级菜单藏起来 —— 看着就像
+「点了个商店，菜单自己变了」。
+
+改回只让 `fwx*` 进普通模式即可。图标映射（`menuIcons`）保留：
+高级模式的顶级菜单同样带图标，那部分是有用的。
+
+> 顺带一提：**进高级模式后 iStore / QuickStart 在普通模式下不可见**，
+> 这是符合预期的 —— 它们本来就该是高级菜单。
+
+### 13.2 每次发布只出 4 个镜像
+
+只保留 squashfs / ext4 各含 efi 与非 efi 共 4 个：
+
+```
+*-squashfs-combined-efi.img.gz
+*-squashfs-combined.img.gz
+*-ext4-combined-efi.img.gz
+*-ext4-combined.img.gz
+```
+
+**关掉 TARGZ 就够了**。`include/image.mk` 里：
+
+```make
+fs-types-$(CONFIG_TARGET_ROOTFS_TARGZ) += targz   # 三个 -targz-* 镜像
+...
+ifdef CONFIG_TARGET_ROOTFS_TARGZ
+	... gzip -9n > ...-rootfs.tar.gz              # 还有 rootfs.tar.gz
+endif
+```
+
+同一个开关同时管着这两样，所以一句 `# CONFIG_TARGET_ROOTFS_TARGZ is not set`
+就都去掉了。这个开关写在 `build-merged-x86_64.sh` 的种子配置里，
+`apply-build-options.sh` 对已有的 `.config` 也会强制同步 ——
+否则重复构建时旧值会残留。
+
+另外 `x86` 的 `IMAGES-y := rootfs.img.gz` 是**无条件**产出的，
+没有开关可关，所以 `-squashfs-rootfs.img.gz` / `-ext4-rootfs.img.gz`
+仍会生成，只是不进 Release。Release 与 Actions 产物都按精确路径匹配，
+只挂那 4 个 + `sha256sums`；发布前还有一道「必须恰好 4 个镜像」的兜底检查。
+
+#### 13.2.1 连带解决：核验不再依赖 rootfs.tar.gz
+
+关掉 TARGZ 会**同时失去 `rootfs.tar.gz`**，而核验脚本正是靠它解包做
+100+ 项文件级检查的 —— 少了它，那些检查会整段变成 SKIP。
+
+解决办法：核验脚本在没有 `rootfs.tar.gz` 时，退回用
+`*-squashfs-rootfs.img.gz`（无条件产出）解包。
+
+这条路径是实测验证过的，不是想当然：把 `squashfs-rootfs.img.gz` 解压后
+`unsquashfs`，再和 `rootfs.tar.gz` 解出来的结果做**逐文件清单比对**：
+
+```
+2760  仅普通文件（squashfs）
+2760  仅普通文件（tar.gz）
+✅ 文件清单完全一致
+```
+
+一个细节：`unsquashfs` 对「squashfs 后面还跟着 `pad-to` 补的零」会返回
+退出码 2，但内容是完整的。所以脚本**不看它的退出码**，改用哨兵文件
+（`/bin/busybox` 与 `/etc/openwrt_release` 是否存在）判断解包是否成功。

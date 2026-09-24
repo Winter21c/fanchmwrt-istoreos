@@ -55,9 +55,13 @@ PART_SIZE="$(sed -n 's/^FANCHMWRT_ROOTFS_PARTSIZE=//p' .build-options 2>/dev/nul
 [ -n "$PART_SIZE" ] || PART_SIZE=1024
 
 # --- 4. 配置 ----------------------------------------------------------------
-# 只给目标与 rootfs 大小，其余（fanchmwrt 的 fwx 全家桶 + iStoreOS 的
-# 面板/Docker/iStore + 磁盘与共享套件）都由 include/target.mk 的
-# DEFAULT_PACKAGES 推导出来。
+# 只给目标、rootfs 大小与镜像类型，其余（fanchmwrt 的 fwx 全家桶 +
+# iStoreOS 的面板/Docker/iStore + 磁盘与共享套件）都由 include/target.mk
+# 的 DEFAULT_PACKAGES 推导出来。
+#
+# TARGZ 显式关掉：它同时控制 -targz-* 三个镜像和 rootfs.tar.gz，
+# 而本项目只出 squashfs / ext4 各两种（efi 与非 efi）共 4 个镜像。
+# 见 include/image.mk 的 fs-types-$(CONFIG_TARGET_ROOTFS_TARGZ)。
 if [ ! -f .config ]; then
 	echo "==> 生成 .config"
 	cat > .config <<EOF
@@ -65,6 +69,9 @@ CONFIG_TARGET_x86=y
 CONFIG_TARGET_x86_64=y
 CONFIG_TARGET_x86_64_DEVICE_generic=y
 CONFIG_TARGET_ROOTFS_PARTSIZE=$PART_SIZE
+CONFIG_TARGET_ROOTFS_SQUASHFS=y
+CONFIG_TARGET_ROOTFS_EXT4FS=y
+# CONFIG_TARGET_ROOTFS_TARGZ is not set
 EOF
 	make defconfig
 fi
@@ -127,4 +134,4 @@ make -j"$JOBS" BUILD_LOG=1
 
 echo
 echo "==> 完成。镜像："
-ls -1 bin/targets/x86/64/ 2>/dev/null | grep -E '\.(img\.gz|img|rootfs\.tar\.gz)$' || true
+ls -1 bin/targets/x86/64/ 2>/dev/null | grep -E -- '-((squashfs|ext4)-combined(-efi)?)\.img\.gz$' || true
