@@ -58,7 +58,17 @@ concurrency:
 
 jobs:
   build:
-    name: 编译 x86_64
+    # 任务名里带上参数，这样运行列表一眼就能看出这次编的是什么配置 ——
+    # 排查时不用点进去、也不用等日志（运行中的日志在 API 上是读不到的）。
+    #
+    # Docker 那一项要用 format() 包一层：直接写 `inputs.enable_docker || 'true'`
+    # 会在用户**取消勾选**时得到 'true'（false 是假值，会走 || 的右半边），
+    # 显示成与事实相反的「含 Docker」。format('{0}', false) 得到字符串 "false",
+    # 是真值，就不会被 || 吃掉。
+    name: >-
+      编译 x86_64 · LAN=${{ inputs.lan_ip || '192.168.1.1' }} ·
+      分区=${{ inputs.rootfs_size || '1024' }}MB ·
+      Docker=${{ format('{0}', inputs.enable_docker) || 'true' }}
     runs-on: ubuntu-24.04
     # GitHub 单个 job 上限是 360 分钟。整棵 OpenWrt 在 4 核 runner 上
     # 大约 2～3 小时，这里留出余量但不超过上限。
