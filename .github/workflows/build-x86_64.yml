@@ -179,10 +179,16 @@ jobs:
           [ "$OPT_DOCKER" = "1" ] && OPT_DOCKER_TXT="包含" || OPT_DOCKER_TXT="不含"
           [ -n "$OPT_LANIP" ] || OPT_LANIP="192.168.1.1（FanchmWrt 默认）"
 
+          # 纯主机名版本，给 Release 说明里的 URL 用。
+          # .build-options 里存的是带前缀长度的形式（如 192.168.100.1/24），
+          # 直接拼进 URL 会变成 http://192.168.100.1/24 —— 那是错的。
+          OPT_LANIP_HOST="${OPT_LANIP%%/*}"
+
           {
             echo "pkgcount=$PKGCOUNT"
             echo "version=$VERSION"
             echo "opt_lanip=$OPT_LANIP"
+            echo "opt_lanip_host=$OPT_LANIP_HOST"
             echo "opt_size=$OPT_SIZE"
             echo "opt_docker=$OPT_DOCKER_TXT"
           } >> "$GITHUB_OUTPUT"
@@ -251,17 +257,43 @@ jobs:
           PKGCOUNT: ${{ steps.summary.outputs.pkgcount }}
           VERSION: ${{ steps.summary.outputs.version }}
           OPT_LANIP: ${{ steps.summary.outputs.opt_lanip }}
+          OPT_LANIP_HOST: ${{ steps.summary.outputs.opt_lanip_host }}
           OPT_SIZE: ${{ steps.summary.outputs.opt_size }}
           OPT_DOCKER: ${{ steps.summary.outputs.opt_docker }}
         run: |
-          sed -e "s/@TAG@/${TAG}/g" \
-              -e "s/@VERSION@/${VERSION}/g" \
-              -e "s/@PKGCOUNT@/${PKGCOUNT}/g" \
-              -e "s/@LANIP@/${OPT_LANIP}/g" \
-              -e "s/@ROOTSIZE@/${OPT_SIZE}/g" \
-              -e "s/@DOCKER@/${OPT_DOCKER}/g" \
-              -e "s/@DATE@/$(date -u +%Y-%m-%d)/g" \
-              .github/release-notes.md > /tmp/release-notes.md
+          # 用 bash 参数展开做模板替换，不用 sed。
+          #
+          # 原因是踩过坑：管理地址形如 192.168.100.1/24，
+          # 而 sed 的 s/@LANIP@/192.168.100.1/24/g 会被替换值里的 /
+          # 提前截断，报 "unknown option to `s'"，整个发布流程挂掉。
+          # 除 / 之外，& 在 sed 替换里表示「匹配到的内容」、反斜杠也要转义，
+          # 这类坑防不胜防。bash 的 ${var//pat/repl} 把替换值当字面量。
+          #
+          # 但有个例外要注意：bash 5.2 起 patsub_replacement 默认开启，
+          # 它让替换值里的 & 也展开成「匹配到的内容」——
+          # 于是 a&b 会变成 a@LANIP@b。当前的值（IP、数字、版本号）都不含 &，
+          # 但关掉它零成本，顺手堵上。
+          shopt -u patsub_replacement 2>/dev/null || true
+
+          template="$(cat .github/release-notes.md)"
+          template="${template//@TAG@/$TAG}"
+          template="${template//@VERSION@/$VERSION}"
+          template="${template//@PKGCOUNT@/$PKGCOUNT}"
+          template="${template//@LANIP@/$OPT_LANIP_HOST}"
+          template="${template//@LANIPFULL@/$OPT_LANIP}"
+          template="${template//@ROOTSIZE@/$OPT_SIZE}"
+          template="${template//@DOCKER@/$OPT_DOCKER}"
+          template="${template//@DATE@/$(date -u +%Y-%m-%d)}"
+          printf '%s\n' "$template" > /tmp/release-notes.md
+
+          # 兜底自检：模板里有新占位符而这里漏了替换的话，
+          # 宁可在这里失败，也不要发一份带着 @XXX@ 的 Release 出去。
+          if grep -qE '@[A-Z_]+@' /tmp/release-notes.md; then
+            echo "::error::Release 说明里仍有未替换的占位符："
+            grep -oE '@[A-Z_]+@' /tmp/release-notes.md | sort -u
+            exit 1
+          fi
+
           echo "=== Release 说明预览 ==="
           head -30 /tmp/release-notes.md
 

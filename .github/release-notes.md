@@ -4,7 +4,7 @@
 
 - **构建版本**：`@VERSION@`
 - **构建日期**：@DATE@
-- **管理地址**：`@LANIP@`
+- **管理地址**：`@LANIPFULL@`
 - **rootfs 分区**：@ROOTSIZE@ MB
 - **Docker**：@DOCKER@
 - **已安装软件包**：@PKGCOUNT@ 个
