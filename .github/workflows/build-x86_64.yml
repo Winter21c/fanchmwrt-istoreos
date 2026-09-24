@@ -334,8 +334,20 @@ jobs:
           printf '  %s\n' $ASSETS
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，改为覆盖附件"
+            echo "Release $TAG 已存在，同步附件"
             gh release upload "$TAG" $ASSETS --clobber
+            # 删掉不在本次清单里的旧附件。
+            # 不做这一步的话，重跑同一个标签（比如改了镜像类型配置）
+            # 会把新旧附件混在一起，Release 上留着一堆用不到的旧文件。
+            gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+              [ -n "$name" ] || continue
+              if printf '%s\n' $ASSETS | grep -qxF "bin/targets/x86/64/$name"; then
+                echo "  保留 $name"
+              else
+                echo "  删除过期附件 $name"
+                gh release delete-asset "$TAG" "$name" --yes || true
+              fi
+            done
             gh release edit "$TAG" --notes-file /tmp/release-notes.md
           else
             gh release create "$TAG" \
