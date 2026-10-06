@@ -106,6 +106,16 @@ fi
 # ---------------------------------------------------------------------------
 # 2. 写 make 片段，供 include/target.mk 读取
 # ---------------------------------------------------------------------------
+# 目标平台。默认 x86_64，保持与加 HT2 之前完全一致的行为。
+#
+# ⚠️ 它必须写进 .build-options，否则**切换目标时缓存不会被作废**。
+#    include/target.mk 里「本项目额外选中的包」那一块是按 $(ARCH) 门控的
+#    （x86_64 与 aarch64 生效），所以同一份 tmp/ 里的 Kconfig 元数据在两个
+#    目标下应当得到不同的 DEFAULT_PACKAGES。target 不参与变更检测的话，
+#    先编了 x86 再编 HT2 会复用 x86 那批元数据 —— 现象是「HT2 固件里多出／
+#    少了几个包」，而构建全绿、没有任何报错。这正是下面第 5 节要防的那类问题。
+FANCHMWRT_TARGET=${FANCHMWRT_TARGET:-x86_64}
+
 TMP_OPT="$(mktemp)"
 cat > "$TMP_OPT" <<EOF
 # 由 scripts/apply-build-options.sh 生成 —— 不要手工编辑，改了会被下次构建覆盖。
@@ -114,8 +124,9 @@ cat > "$TMP_OPT" <<EOF
 #
 # 格式说明：用普通的 VAR=VALUE（而不是 make 的 VAR:=VALUE），
 # 这样 shell 侧 sed 's/^VAR=//' 就能直接取值 —— 本文件同时被
-# build-merged-x86_64.sh / verify-merged-firmware.sh / CI 工作流解析。
-# make 对 VAR=VALUE 一样接受。
+# build-merged-x86_64.sh / build-merged-ht2.sh / verify-merged-firmware.sh
+# / CI 工作流解析。make 对 VAR=VALUE 一样接受。
+FANCHMWRT_TARGET=$FANCHMWRT_TARGET
 FANCHMWRT_ENABLE_DOCKER=$ENABLE_DOCKER
 FANCHMWRT_LAN_IP=$LAN_IP
 FANCHMWRT_ROOTFS_PARTSIZE=$ROOTFS_PARTSIZE
@@ -197,18 +208,25 @@ say "已生成 $FILES_DIR/etc/build-options"
 # ---------------------------------------------------------------------------
 # 4. 如果 .config 已存在，同步与「出哪些镜像」相关的几项
 #
-# 没有 .config 时由 build-merged-x86_64.sh 的种子负责写入；
+# 没有 .config 时由构建脚本的种子负责写入；
 # 这一节管的是「已经有 .config 又改了参数」的情况，避免陈旧值残留。
 # 只动下面列出的这几行，不碰其它配置。
 #
-# 镜像策略：只出 squashfs / ext4 各两种（efi 与非 efi）共 4 个。
+# ⚠️ 整节**只对 x86_64 生效**，判据是 .config 里的目标符号。
+#    squashfs / ext4 / targz 这三个开关是给 x86 的 GRUB 镜像选形态用的；
+#    rockchip 的产物形态由 target/linux/rockchip/image/Makefile 里的
+#    `IMAGE/sysupgrade.img.gz = boot-common | boot-script | pine64-img | ...`
+#    决定，不归 .config 管。对 rockchip 也照做一遍，是在改一个与产物无关的
+#    开关 —— 不致命，但会让人误以为它跟产物有关，下次排查就多一个坑。
+#
+# 镜像策略（x86）：只出 squashfs / ext4 各两种（efi 与非 efi）共 4 个。
 #   * TARGZ 关掉 —— 它同时控制 -targz-* 三个镜像和 rootfs.tar.gz
 #     （见 include/image.mk 的 fs-types-$(CONFIG_TARGET_ROOTFS_TARGZ)）
 #   * squashfs 与 ext4 都打开 —— 它们是上面那 4 个镜像的来源
 # 注意 -rootfs.img.gz 两个是 x86 的 IMAGES-y 无条件产出的，
 # 没有开关可关；它们不会进 Release，只留在 bin/ 里。
 # ---------------------------------------------------------------------------
-if [ -f "$TOPDIR/.config" ]; then
+if [ -f "$TOPDIR/.config" ] && grep -q '^CONFIG_TARGET_x86_64=y$' "$TOPDIR/.config"; then
 	set_config() {
 		# set_config <CONFIG_项> <y|n>
 		key="$1"; want="$2"
@@ -248,6 +266,18 @@ fi
 #
 # 所以参数一变就把 tmp/ 和 .config 一起清掉，让它们从种子重新长出来。
 # 旧 .config 备份成 .config.old（OpenWrt 既有约定，已在 .gitignore 里）。
+#
+# ---------------------------------------------------------------------------
+# 目标切换也走同一条路
+# ---------------------------------------------------------------------------
+# FANCHMWRT_TARGET 是这份参数文件的一部分，所以**从 x86_64 切到 rockchip-armv8
+# （或反过来）会被判为「参数有变化」**，照样作废 tmp/ 与 .config。
+#
+# 这一条不能省：include/target.mk 里「本项目额外选中的包」是按 $(ARCH) 门控的，
+# 同一份 tmp/ 元数据在两个架构下应当导出不同的 DEFAULT_PACKAGES。
+# 不作废的话，先编 x86 再编 HT2 会复用 x86 那批元数据 —— 现象是
+# 「HT2 固件里多出/少了几个包」，构建全绿，没有任何报错。
+# 这是与上面 a)、b) 同一类的问题，只是触发条件从「改勾选」变成了「换目标」。
 # ---------------------------------------------------------------------------
 if [ "$OPTIONS_CHANGED" = "1" ]; then
 	echo "==> $CHANGE_REASON，作废过期的缓存"

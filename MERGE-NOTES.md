@@ -905,3 +905,205 @@ name: >-
 GitHub 会在仓库**连续 60 天没有任何活动**后自动停用定时工作流
 （会在 Actions 页面留一条提示，需要手动重新启用）。
 本仓库如果长期不提交，定时构建会静默停止。
+
+---
+
+## 15. 目标二：HINLINK HT2（Rockchip RK3528）
+
+上面 1~14 节全部是关于 x86 的。这一节记第二目标的来龙去脉。
+
+### 15.1 为什么要单开一个目标
+
+HT2 是一台实体盒子（RK3528A / LPDDR4 1~4GB / eMMC 8~64GB / **一个千兆口** /
+SDIO WiFi6）。它与 x86 的差别**不在包选集**，而在设备层：
+
+| | x86_64 | rockchip-armv8 |
+|---|---|---|
+| 引导 | GRUB | u-boot-rockchip（写在镜像开头 32768 扇区）|
+| 镜像 | 4 个 combined（squashfs/ext4 × efi/非 efi）| 2 个 `sysupgrade.img.gz`（squashfs / ext4）|
+| 网口 | 内核自动命名，通常 br-lan + br-wan | 设备树决定：唯一的口是 eth0，且是 LAN |
+| 无线 | 通常没有 | SDIO，两个可能批次 |
+| 管理地址 | 落在 br-lan | 同一个 uci-defaults 逻辑，但只有 br-lan |
+
+所以这不是「换个 .config」，而是新增一套设备支持。做法是**平行开一条构建路径**，
+而不是给 `build-merged-x86_64.sh` 加 `--target` 参数：两者的准备阶段只有
+feeds / 补丁 / 构建参数三步共用，配置种子与断言清单都不一样，写成一个脚本
+加 if 分叉只会让读的人每次都要在脑子里装下两套形态。
+
+### 15.2 特性集保持一致的唯一改动点
+
+`include/target.mk` 里「本项目额外选中的包」那一块原本门控在
+`$(filter x86_64,$(ARCH))`。HT2 要拿到同一套特性（quickstart / iStore /
+dockerman / fwx 全家桶），所以改成：
+
+```make
+ifneq ($(filter x86_64 aarch64,$(ARCH)),)
+```
+
+**为什么只加 aarch64 而不是全部架构**：quickstart 的后端二进制上游只提供
+x86_64 / aarch64 / arm 三档，`luci-app-dockerman` 自己也限定
+`@(aarch64||arm||x86_64)`。往 mips / armv7 上铺同样的特性集，缺的不是这个
+白名单，而是 quickstart 的后端二进制。所以这里不要随手加架构。
+
+### 15.3 无线：两个批次，两套驱动
+
+HT2 至少有两个批次：
+
+* 厂商 DTS 写的是 `wifi_chip_type = "ap6275s"` —— AMPAK 模块，芯片是
+  Broadcom **BCM43752**（SDIO vendor `0x02d0` / device `0xaae8`）；
+* 而 [leux 的 iStoreOS 适配教程](https://leux.net/doc/iStoreOS%E9%80%82%E9%85%8DHT2.html)
+  里移植的是 **AIC8800D80**（SDIO vendor `0xc8a1`）。
+
+两者在设备树上是**同一套接线** —— 都挂 `&sdio0`，共用 GPIO1_A6 复位脚
+（`sdio_pwrseq`）—— 所以 DTS 不用改，差别只在驱动与固件。
+**两套都编进固件**，开机 `dmesg | grep -iE "brcmfmac|aicwf"` 谁认到就是谁，
+用户不需要先拆机确认。代价是几 MB 体积，对 8GB eMMC 可以忽略。
+
+两个包是本仓库新增的：
+
+* `package/firmware/brcmfmac-43752/` —— BCM43752 的 SDIO 固件。
+  **linux-firmware 与 cypress-firmware 都没有这颗芯片**（核对过
+  linux-firmware-20260221 的全部 4866 个文件：`brcm/` 下没有
+  `brcmfmac43752-*`，`cypress/` 下也没有 `cyfmac43752-*`；Infineon 的
+  `ifx-linux-firmware` 同样没有）。所以从 Armbian 的 firmware 仓库取，
+  并且**只取那 4 个文件**（约 860KB）—— 整仓约 200MB，最大的单个文件是高通基带。
+  用 `Download/` 机制逐个下载，不走 `PKG_SOURCE_PROTO:=git` 拉整仓。
+* `package/kernel/aic8800/` —— 从 ImmortalWrt 移植过来的 AIC8800 驱动
+  （上游 `radxa-pkg/aic8800`）。包本身是 OpenWrt 通用的，未作修改。
+
+NVRAM 文件的来历值得记一笔：`brcmfmac43752-sdio.txt` 的文件头写的是
+`# AP6275S_NVRAM_V1.7_20210726` / `# AP6275S v00 WLBGA reference board`，
+也就是 AMPAK AP6275S 参考板的 NVRAM —— 与厂商 DTS 的 `ap6275s` 对得上。
+这也是「AP6275S 就是 BCM43752」这条判断的实证。
+
+### 15.4 设备层改了哪些文件
+
+| 文件 | 改法 |
+|---|---|
+| `target/linux/rockchip/patches-6.12/102-arm64-dts-rockchip-Add-HINLINK-HT2.patch` | 新增（设备树） |
+| `package/boot/uboot-rockchip/patches/108-board-rockchip-add-HINLINK-HT2.patch` | 新增（U-Boot 板级支持） |
+| `package/boot/uboot-rockchip/Makefile` | 加 `U-Boot/hinlink-ht2-rk3528` + `UBOOT_TARGETS` |
+| `target/linux/rockchip/image/armv8.mk` | 加 `Device/hinlink_ht2` |
+| `target/linux/rockchip/armv8/base-files/etc/board.d/01_leds` | 加 `hinlink,ht2)` 分支 |
+| `target/linux/rockchip/armv8/base-files/etc/board.d/02_network` | 加网口分支 + MAC 分支 |
+
+设备树补丁的 Makefile hunk 用的是**两棵树都存在的上下文**
+（`rk3528-radxa-e20c.dtb` / `rk3528-rock-2a.dtb` / `rk3528-rock-2f.dtb`），
+而不是挨着 `hinlink-h28k` 那一行 —— 因为 ImmortalWrt 那棵树里**没有 h28k**，
+用它当上下文补丁就只能在一棵树上打。这一条是实测出来的：在重建的两棵
+Makefile 上都验证过能干净应用（ImmortalWrt 侧报 `offset -1 lines`，属正常）。
+
+### 15.5 电源：为什么 `regulator-init-microvolt` 只写在 U-Boot 里
+
+RK3528 的 `vdd_arm` / `vdd_logic` / `vdd_gpu` 都是 **PWM 调节器**
+（`pwm-regulator`），U-Boot 在启动 Linux 之前就把它们设好了。
+
+容易踩的坑是以为内核会重新设一遍。核对过内核源码
+（`drivers/regulator/pwm-regulator.c` 的 `pwm_regulator_init_boot_on`）：
+
+```c
+	pwm_get_state(drvdata->pwm, &pstate);
+	if (pstate.enabled)
+		return 0;      /* U-Boot 已经开了 → 内核什么都不动 */
+```
+
+也就是说**只要 U-Boot 把 PWM 打开了，内核就不会去改电压**。
+所以 `regulator-init-microvolt` 写在
+`arch/arm/dts/rk3528-hinlink-ht2-u-boot.dtsi` 里（U-Boot 读），
+内核 DTS 里不写 —— 与 radxa-e20c、hinlink-h28k 的既有做法一致。
+
+这很重要：写错地方的话，轻则电压没设对，重则是内核在启动过程中
+把一个已经正确的电压改成别的值。
+
+### 15.6 与 immortalwrt-fusion 的关系
+
+那份构建器跟踪同一个设备，用的是**逐字节相同的设备树补丁与 U-Boot 补丁**。
+两边都验证过能干净应用。
+
+差别在固件来源：
+* 本仓库（OpenWrt 25.12.4 底座）没有 BCM43752 固件包，也没有 aic8800 驱动，
+  所以 15.3 里那两个包是本仓库新增的；
+* immortalwrt-fusion 的底座是 ImmortalWrt，它自带
+  `package/firmware/armbian-firmware`（有 `brcmfmac-firmware-43752-sdio` +
+  `brcmfmac-nvram-43752-sdio`）与 `package/kernel/aic8800`，
+  所以那边不需要新增包，直接用底座的。
+
+两边的设备定义里 `DEVICE_PACKAGES` 因此是一样的。
+
+---
+
+## 16. 顺手修掉的一个上游坑：U-Boot 的 pylibfdt 与 SWIG 4.5
+
+### 16.1 现象
+
+编 HT2 的 U-Boot 时失败，报错在**跟板子毫无关系的地方**：
+
+```
+scripts/dtc/pylibfdt/libfdt_wrap.c: error: implicit declaration of function 'PyInt_AsLong'
+scripts/dtc/pylibfdt/libfdt_wrap.c: error: implicit declaration of function 'PyString_FromString'
+error: command '.../staging_dir/host/bin/gcc' failed with exit code 1
+make[6]: *** [scripts/dtc/pylibfdt/Makefile:33:rebuild] Error 1
+make[4]: *** [Makefile:2318: scripts_dtc] Error 2
+```
+
+看起来像「板级支持写错了」或者「工具链有问题」，其实两者都不是。
+
+### 16.2 根因
+
+u-boot 自带的 `scripts/dtc/pylibfdt/libfdt.i` 里有三处 **Python 2 的 C API**：
+
+| 位置 | 原写法 | 应改为 |
+|---|---|---|
+| `%typemap(out) (struct fdt_property *)` | `PyString_FromString` | `PyUnicode_FromString` |
+| `%typemap(in) (const void *val)` 的 `%#else` 分支 | `PyString_AsString` | `PyBytes_AsString` |
+| `%typemap(in) fdt_next_node` | `PyInt_AsLong` | `PyLong_AsLong` |
+
+这些 API 在 Python 3 里**早就不存在**。之所以一直能编，是因为 SWIG 生成 wrapper 时
+会自动插一段兼容宏，把 `PyInt_AsLong` 之类别名到 `PyLong_AsLong`：
+
+```c
+#if PY_VERSION_HEX >= 0x03000000
+#  define PyInt_AsLong  PyLong_AsLong
+...
+#endif
+```
+
+**SWIG 4.5.0 把这段宏删了**（彻底放弃 Python 2）。于是原样生成的
+`libfdt_wrap.c` 里就出现了未声明的 `PyInt_AsLong`，编译失败。
+
+本机的 SWIG 是 4.5.1，所以必现。GitHub 的 ubuntu-24.04 runner 上是 SWIG 4.2，
+还有那段宏，所以 CI 不会暴露这个问题 —— 但 Debian trixie / Fedora 42+
+以及任何自己升了 SWIG 的机器都会撞上。
+
+参考（同一处问题、同一套改法）：
+* Yocto/OE-core 的 u-boot 配方补丁：<https://patchwork.yoctoproject.org/project/oe-core/patch/20260811111120.17612-4-jaipaul.cheernam@est.tech/>
+* Armbian 的同名修复：<https://github.com/armbian/build/pull/10217>
+
+### 16.3 为什么不能绕开
+
+pylibfdt 看着像是「只有 Python 工具才需要」，其实绕不过去：
+
+* `package/boot/uboot-rockchip/Makefile` 第 15 行写着 `UBOOT_USE_INTREE_DTC:=1`
+  —— rockchip 的 U-Boot 需要**树内**的 dtc（上游那版对新 DT 语法支持不够），
+  而 U-Boot 的规则是「用了树内 dtc 就连 pylibfdt 一起编」；
+* U-Boot 里的 `NO_PYTHON=y` 确实能跳过它，但**同时会跳过 binman**，
+  而 rockchip 的 `u-boot-rockchip.bin` 正是 binman 拼出来的。
+
+所以只有「把这三处改成 Python 3 的写法」这一条路。
+
+### 16.4 补丁位置
+
+```
+package/boot/uboot-rockchip/patches/109-uboot-pylibfdt-fix-python3-api-for-swig-4.5.patch
+```
+
+改动是 3 行替换，安全性没有疑问：被删掉的那些宏**本来就是**指向这几个
+Python 3 函数的别名，而且这三处代码所在的分支本来就是 Python 3 专用
+（周围的 `%#if PY_VERSION_HEX >= 0x03000000` 就是这么写的）。
+
+上游的 dtc 与 u-boot 更新自带这处修复之后，这个补丁可以直接删掉。
+
+immortalwrt-fusion 那份构建器也带了同一个补丁（放在它的 rockchip 目标层里），
+因为那边同样要编 U-Boot。
+
+---

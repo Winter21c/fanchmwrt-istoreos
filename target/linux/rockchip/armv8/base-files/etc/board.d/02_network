@@ -59,6 +59,12 @@ rockchip_setup_interfaces()
 	sinovoip,rk3568-bpi-r2pro)
 		ucidef_set_interfaces_lan_wan 'lan0 lan1 lan2 lan3' 'eth0'
 		;;
+	hinlink,ht2)
+		# HT2 只有一个 RTL8211F 千兆口（gmac1），没有第二个口可用作 WAN。
+		# 这里显式写出而不是依赖下面的默认分支：默认分支将来若被改动，
+		# 单网口设备会静默地多出一个不存在的 wan 接口。
+		ucidef_set_interface_lan 'eth0'
+		;;
 	*)
 		ucidef_set_interface_lan 'eth0'
 		;;
@@ -83,6 +89,13 @@ rockchip_setup_macs()
 	lunzn,fastrhino-r66s)
 		wan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
 		lan_mac=$(macaddr_add "$wan_mac" 1)
+		;;
+	hinlink,ht2)
+		# 板子上没有存 MAC 的 EEPROM（对照过 HT2 厂商 DTS：i2c 一路都没开），
+		# 所以跟 H28K 一样从 eMMC 的 CID 派生。
+		# 与 H28K 分开写，是因为 HT2 没有 wan 口 —— 走上面那个分支会生成一个
+		# 指向不存在接口的 network.wan 段。
+		lan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
 		;;
 	friendlyarm,nanopi-r2c-plus|\
 	friendlyarm,nanopi-r4s|\

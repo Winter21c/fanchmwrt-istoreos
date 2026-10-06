@@ -163,13 +163,19 @@ endif
 FANCHMWRT_ENABLE_DOCKER ?= 1
 
 ##@
-# @brief 本项目额外选中的包（仅 x86_64）。
+# @brief 本项目额外选中的包（x86_64 与 aarch64）。
 #
-# 只对 x86_64 生效：
+# 这两个架构是本项目实际构建的：x86_64 软路由，以及 aarch64 的
+# Rockchip RK3528（HINLINK HT2，见 build-merged-ht2.sh）。
+#
+# 架构白名单的由来：
 #   * quickstart 后端只有 x86_64 / aarch64 / arm 的预编译二进制，而
 #     luci-app-quickstart 硬依赖它，别的架构选了也编不出来；
-#   * luci-app-dockerman 自身限定 @(aarch64||arm||x86_64)；
-#   * 本固件的目标就是 x86 软路由，其余机型不参与构建。
+#   * luci-app-dockerman 自身限定 @(aarch64||arm||x86_64)。
+#
+# 换句话说这里的两个架构不是「顺手加上去的」，而是**上游真的提供了产物**的
+# 那两档。要往 mips / armv7 上铺同样的特性集，缺的不是这个白名单，
+# 而是 quickstart 的后端二进制 —— 所以不要随手往这里加架构。
 #
 # xz-utils 不是可选项：luci-app-store 依赖 tar，而 tar 的 PACKAGE_TAR_XZ
 # （默认 y）会在依赖者身上展开成 `depends on !(PACKAGE_TAR_XZ) || PACKAGE_xz-utils`。
@@ -184,7 +190,7 @@ FANCHMWRT_ENABLE_DOCKER ?= 1
 #
 # build-defaults 承载构建时选定的默认值（管理地址、参数记录），必须始终存在。
 ##
-ifneq ($(filter x86_64,$(ARCH)),)
+ifneq ($(filter x86_64 aarch64,$(ARCH)),)
   DEFAULT_PACKAGES += \
 	luci-app-quickstart \
 	luci-app-store \

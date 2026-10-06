@@ -6,9 +6,19 @@
 
 # FanchmWrt × iStoreOS 融合固件
 
-**把 [FanchmWrt](https://github.com/fanchmwrt/fanchmwrt) 的路由与流控能力，和 [iStoreOS](https://github.com/istoreos/istoreos) 的首页面板、Docker、应用商店，合进同一份 x86 软路由固件。**
+**把 [FanchmWrt](https://github.com/fanchmwrt/fanchmwrt) 的路由与流控能力，和 [iStoreOS](https://github.com/istoreos/istoreos) 的首页面板、Docker、应用商店，合进同一份固件。**
 
-面向 **x86_64**。基于 OpenWrt 25.12。
+基于 OpenWrt 25.12。两个目标，各自独立构建、独立出产物：
+
+| 目标 | 构建脚本 | 工作流 | 产物 |
+|---|---|---|---|
+| **x86_64** 软路由 | `./build-merged-x86_64.sh` | 「构建 x86_64 固件」 | 4 个 combined 镜像 |
+| **HINLINK HT2**（Rockchip RK3528 / aarch64） | `./build-merged-ht2.sh` | 「构建 HT2 固件」 | 2 个 `sysupgrade.img.gz` |
+
+> 两个目标共用同一份**特性集**（fwx 全家桶 + iStoreOS 面板/商店 + Docker + 轻 NAS 套件），
+> 差别只在设备层：设备树、U-Boot 板级支持、网口与 LED 的映射。
+> `include/target.mk` 里那块「本项目额外选中的包」对 `x86_64` 与 `aarch64` 同时生效，
+> 所以两边拿到的包是一样多的。
 
 ---
 
@@ -231,6 +241,97 @@ LAN_IP=192.168.100.1 ENABLE_DOCKER=0 ROOTFS_PARTSIZE=2048 \
 
 本仓库是公开仓库，GitHub 对公开仓库的 Actions **不计费**。
 单次构建约消耗 2～3 小时 runner 时间。
+
+---
+
+## 📡 目标二：HINLINK HT2（Rockchip RK3528）
+
+x86 那套是软路由；这一套是一台**实体盒子**。
+
+### 硬件
+
+| | |
+|---|---|
+| SoC | Rockchip RK3528A（4× Cortex-A53） |
+| 内存 / 存储 | LPDDR4 1 / 2 / 4 GB ｜ eMMC 8 / 32 / 64 GB + microSD |
+| 网络 | **1 个千兆口**（RTL8211F，接在 gmac1 上） |
+| 无线 | SDIO WiFi 6，两个批次：AMPAK AP6275S（Broadcom BCM43752）或 AICSemi AIC8800 |
+| USB | 1× USB 3.0、1× USB 2.0 |
+| 调试串口 | UART0，**1500000** 8N1（不是 115200） |
+
+### 无线为什么两套驱动都装
+
+HT2 至少有两个批次：厂商 DTS 写的是 `wifi_chip_type = "ap6275s"`，
+而 [leux 那篇 iStoreOS 适配教程](https://leux.net/doc/iStoreOS%E9%80%82%E9%85%8DHT2.html)
+里移植的是 AIC8800D80。
+
+两者在设备树上是**同一套接线** —— 都挂 `&sdio0`、共用 GPIO1_A6 复位脚 ——
+所以 DTS 不用改，差别只在驱动与固件。两套都编进去之后，
+开机 `dmesg | grep -iE "brcmfmac|aicwf"` 谁认到就是谁，不需要先拆机确认。
+
+代价是几 MB 的固件体积，对一个 8GB eMMC 的机器可以忽略。
+
+### 编译
+
+```sh
+./build-merged-ht2.sh                    # 含 fwx + iStoreOS，不含 Docker
+ENABLE_DOCKER=1 ./build-merged-ht2.sh    # 要容器主机时带上
+LAN_IP=192.168.100.1 ROOTFS_PARTSIZE=2048 ./build-merged-ht2.sh
+
+# 产物在 bin/targets/rockchip/armv8/
+```
+
+Docker 的默认与 x86 一致（**含**）。HT2 低配版只有 1GB 内存，
+dockerd + containerd 常驻会吃掉相当一部分，要省内存就显式关掉：
+
+```sh
+ENABLE_DOCKER=0 ./build-merged-ht2.sh
+```
+
+### 刷机
+
+产物有两个（每个启用的文件系统类型各一个）—— 两个都是完整的磁盘镜像，
+**u-boot 已经在镜像开头**：
+
+| 文件 | 说明 |
+|---|---|
+| `…hinlink_ht2-squashfs-sysupgrade.img.gz` | ⭐ **推荐**。只读根 + overlay，支持恢复出厂 |
+| `…hinlink_ht2-ext4-sysupgrade.img.gz` | 可写根，装大件更省空间，但没有一键恢复出厂 |
+
+```sh
+# 写 microSD（首次安装走这条路）
+gunzip -c ...-hinlink_ht2-squashfs-sysupgrade.img.gz | sudo dd of=/dev/sdX bs=4M conv=fsync
+```
+
+插卡上电即从卡启动（RK3528 的 u-boot 启动顺序是 SD → eMMC）。
+
+要装进 eMMC，**从 SD 启动后不要直接 sysupgrade** —— 那样写的是 SD 卡本身。
+要指名设备：
+
+```sh
+cat /proc/partitions        # 从 SD 启动时：eMMC = mmcblk0，SD = mmcblk1
+gunzip -c ...-hinlink_ht2-squashfs-sysupgrade.img.gz | dd of=/dev/mmcblk0 bs=4M conv=fsync
+sync && poweroff             # 拔卡再上电，就从 eMMC 启动了
+```
+
+装好之后 `sysupgrade -k <img>` 就是对的（写 eMMC、保留配置）。
+
+> ⚠️ `sysupgrade` 会把 u-boot 一起重写（保证引导与内核配套）。
+> 刷写中途断电要用板上那个 Maskrom 按键救回来，刷之前确认供电稳定。
+
+### 设备层在各个文件里的位置
+
+| 东西 | 位置 |
+|---|---|
+| 设备树 | `target/linux/rockchip/patches-6.12/102-arm64-dts-rockchip-Add-HINLINK-HT2.patch` |
+| U-Boot 板级支持 | `package/boot/uboot-rockchip/patches/108-board-rockchip-add-HINLINK-HT2.patch` |
+| 设备定义（菜单项、包集） | `target/linux/rockchip/image/armv8.mk` 的 `Device/hinlink_ht2` |
+| LED / 网口 / MAC | `target/linux/rockchip/armv8/base-files/etc/board.d/{01_leds,02_network}` |
+| BCM43752 固件 | `package/firmware/brcmfmac-43752/` |
+| AIC8800 驱动 | `package/kernel/aic8800/` |
+
+内核的 DTS 补丁**同时适用于 immortalwrt-fusion**（那份构建器也跟踪同一个设备），
+所以两边用的是逐字节相同的设备树。
 
 ---
 

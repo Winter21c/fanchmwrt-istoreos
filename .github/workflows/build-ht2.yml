@@ -1,0 +1,342 @@
+# GitHub Actions 在线编译 HINLINK HT2（Rockchip RK3528 / aarch64）固件
+#
+# 与「构建 x86_64 固件」是两个独立的工作流，产物也各自独立：
+#   x86_64          bin/targets/x86/64/          4 个 combined 镜像
+#   rockchip-armv8  bin/targets/rockchip/armv8/  1 个 sysupgrade.img.gz
+#
+# 分开的理由：两个目标的构建时间都很长（各 2~3 小时），而且互不依赖 ——
+# 合成一个工作流只会让「这次到底是哪一步挂了」更难看出来。
+#
+# 用法：
+#   1. 手动触发：Actions →「构建 HT2 固件」→ Run workflow
+#   2. 打 tag 自动发布：push 一个 v* 标签
+#
+name: 构建 HT2 固件
+
+on:
+  workflow_dispatch:
+    inputs:
+      lan_ip:
+        description: '管理地址（LAN IP），可带前缀长度。HT2 只有一个网口，它就是 LAN'
+        type: string
+        default: '192.168.1.1'
+      rootfs_size:
+        description: 'rootfs 分区大小（MB）。HT2 是 8/32/64GB eMMC，1024 起步够用'
+        type: choice
+        options:
+          - '512'
+          - '1024'
+          - '2048'
+          - '4096'
+          - '8192'
+        default: '1024'
+      enable_docker:
+        description: '包含 Docker（dockerd + docker-compose + Dockerman 界面）'
+        type: boolean
+        default: false
+      create_release:
+        description: '构建成功后创建 Release'
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Release 标签（留空 = 自动用 日期-时间）'
+        type: string
+        required: false
+      upload_artifact:
+        description: '把镜像作为构建产物上传（Actions 页面可直接下载）'
+        type: boolean
+        default: true
+
+  push:
+    tags:
+      - 'ht2-v*'
+
+# 创建 Release 需要写权限；读取代码只需要读权限。
+permissions:
+  contents: write
+
+# 同一分支/标签同时只跑一个，避免两次构建互相覆盖产物。
+concurrency:
+  group: build-ht2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # 任务名里带上参数，运行列表一眼可辨（理由与 x86 工作流相同：
+    # 定时触发时 inputs.* 全为空，且 boolean 的 false 会被 || 吃掉，
+    # 所以要用 format() 包一层）。
+    name: >-
+      编译 HT2 (RK3528) · LAN=${{
+        inputs.lan_ip || '192.168.1.1'
+      }} · 分区=${{
+        inputs.rootfs_size || '1024'
+      }}MB · Docker=${{
+        format('{0}', inputs.enable_docker) || 'false'
+      }}
+    runs-on: ubuntu-24.04
+    # GitHub 单个 job 上限 360 分钟。ARM 目标的包比 x86 少一些，
+    # 但工具链要重新编一遍，仍然留足余量。
+    timeout-minutes: 350
+
+    env:
+      CURL_OPTIONS: --speed-limit 51200 --speed-time 60
+
+    steps:
+      # ---------------------------------------------------------------------
+      # Docker 默认关闭：HT2 的内存档位低到 1GB，dockerd + containerd 常驻
+      # 就要吃掉相当一部分，而这块板子的主业是路由。要做容器主机时在
+      # Run workflow 里勾上即可。
+      - name: 确定构建参数
+        run: |
+          {
+            echo "LAN_IP=${{ inputs.lan_ip }}"
+            echo "ROOTFS_PARTSIZE=${{ inputs.rootfs_size }}"
+            echo "ENABLE_DOCKER=${{ inputs.enable_docker }}"
+          } >> "$GITHUB_ENV"
+
+          echo "本次构建参数（空值表示交给脚本取默认）："
+          echo "  LAN_IP          = ${{ inputs.lan_ip }}"
+          echo "  ROOTFS_PARTSIZE = ${{ inputs.rootfs_size }}"
+          echo "  ENABLE_DOCKER   = ${{ inputs.enable_docker }}"
+
+      # ---------------------------------------------------------------------
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ---------------------------------------------------------------------
+      # 全量编译需要约 30GB，runner 根分区初始只有约 14GB 可用。
+      - name: 释放磁盘空间
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift \
+            /usr/local/.ghcup \
+            /opt/az \
+            /usr/lib/jvm || true
+          sudo apt-get clean
+          echo "=== 清理后 ==="
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gettext \
+            git libncurses-dev libssl-dev python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget time \
+            device-tree-compiler cpio bc
+
+      # ---------------------------------------------------------------------
+      # 缓存下载的源码包。
+      #
+      # ARM 目标要额外下不少东西（trusted-firmware-a、u-boot、armbian-firmware
+      # 约 200MB 等）。key 里带目标名，免得和 x86 工作流互相覆盖 ——
+      # dl/ 里绝大多数文件其实是共用的，但混用会让缓存命中变得不可预测。
+      - name: 缓存源码包
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: dl-ht2-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            dl-ht2-
+            dl-
+
+      # ---------------------------------------------------------------------
+      # 复用仓库里的构建脚本做「准备」阶段，保证 CI 与本地构建同一套逻辑。
+      - name: 准备（feeds / 补丁 / 配置 / 校验）
+        env:
+          SKIP_BUILD: '1'
+        run: ./build-merged-ht2.sh
+
+      - name: 下载源码
+        run: make -j"$(nproc)" download || echo "::warning::部分源码下载失败，编译阶段 make 会重试"
+
+      - name: 编译固件
+        run: make -j"$(nproc)" BUILD_LOG=1
+
+      # ---------------------------------------------------------------------
+      - name: 编译失败时输出日志
+        if: failure()
+        run: |
+          echo "=== 最近修改的构建日志 ==="
+          find logs -type f -name '*.txt' -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | head -3 | cut -d' ' -f2- \
+            | while read -r f; do
+                echo "----- $f -----"
+                tail -60 "$f"
+              done
+          echo "=== 磁盘占用 ==="
+          df -h /
+
+      - name: 核验产物
+        env:
+          FANCHMWRT_TARGET: rockchip-armv8
+        run: ./scripts/verify-merged-firmware.sh
+
+      - name: 汇总产物信息
+        id: summary
+        run: |
+          MANIFEST=$(ls -1 bin/targets/rockchip/armv8/*.manifest | head -1)
+          PKGCOUNT=$(wc -l < "$MANIFEST")
+          VERSION=$(cat bin/targets/rockchip/armv8/version.buildinfo 2>/dev/null || echo unknown)
+
+          OPT_DOCKER=$(sed -n 's/^FANCHMWRT_ENABLE_DOCKER=//p' .build-options)
+          OPT_LANIP=$(sed -n 's/^FANCHMWRT_LAN_IP=//p' .build-options)
+          OPT_SIZE=$(sed -n 's/^FANCHMWRT_ROOTFS_PARTSIZE=//p' .build-options)
+          [ "$OPT_DOCKER" = "1" ] && OPT_DOCKER_TXT="包含" || OPT_DOCKER_TXT="不含"
+          [ -n "$OPT_LANIP" ] || OPT_LANIP="192.168.1.1（默认）"
+
+          # 纯主机名版本，给 Release 说明里的 URL 用（去掉前缀长度）。
+          OPT_LANIP_HOST="${OPT_LANIP%%/*}"
+
+          IMGS=$(ls -1 bin/targets/rockchip/armv8/*hinlink_ht2-*-sysupgrade.img.gz)
+
+          {
+            echo "pkgcount=$PKGCOUNT"
+            echo "version=$VERSION"
+            echo "opt_lanip=$OPT_LANIP"
+            echo "opt_lanip_host=$OPT_LANIP_HOST"
+            echo "opt_size=$OPT_SIZE"
+            echo "opt_docker=$OPT_DOCKER_TXT"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 构建成功（HINLINK HT2 / RK3528）"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "|---|---|"
+            echo "| 版本 | \`$VERSION\` |"
+            echo "| 管理地址 | \`$OPT_LANIP\` |"
+            echo "| rootfs 分区 | ${OPT_SIZE} MB |"
+            echo "| Docker | $OPT_DOCKER_TXT |"
+            echo "| 已安装软件包 | $PKGCOUNT 个 |"
+            echo "| 核验 | 全部通过 |"
+            echo ""
+            echo "| 镜像 | 大小 |"
+            echo "|---|---|"
+            for f in $IMGS; do
+              printf '| `%s` | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------------
+      - name: 上传构建产物
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanchmwrt-istoreos-ht2
+          path: |
+            bin/targets/rockchip/armv8/*hinlink_ht2-*-sysupgrade.img.gz
+            bin/targets/rockchip/armv8/sha256sums
+          if-no-files-found: error
+          retention-days: 30
+
+      # ---------------------------------------------------------------------
+      - name: 确定 Release 标签
+        id: tag
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.release_tag }}"
+            [ -n "$TAG" ] || TAG="ht2-$(date -u +%Y%m%d-%H%M)"
+          fi
+          case "$TAG" in
+            *[!A-Za-z0-9._-]*|'')
+              echo "::error::非法的 Release 标签：'$TAG'（只允许字母、数字、点、下划线、连字符）"
+              exit 1
+              ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "将使用标签：$TAG"
+
+      - name: 生成 Release 说明
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          PKGCOUNT: ${{ steps.summary.outputs.pkgcount }}
+          VERSION: ${{ steps.summary.outputs.version }}
+          OPT_LANIP: ${{ steps.summary.outputs.opt_lanip }}
+          OPT_LANIP_HOST: ${{ steps.summary.outputs.opt_lanip_host }}
+          OPT_SIZE: ${{ steps.summary.outputs.opt_size }}
+          OPT_DOCKER: ${{ steps.summary.outputs.opt_docker }}
+        run: |
+          # 用 bash 参数展开做模板替换，不用 sed —— 理由同 x86 工作流：
+          # 替换值里的 / 会让 sed 的 s/// 提前截断。
+          shopt -u patsub_replacement 2>/dev/null || true
+
+          template="$(cat .github/release-notes-ht2.md)"
+          template="${template//@TAG@/$TAG}"
+          template="${template//@VERSION@/$VERSION}"
+          template="${template//@PKGCOUNT@/$PKGCOUNT}"
+          template="${template//@LANIP@/$OPT_LANIP_HOST}"
+          template="${template//@LANIPFULL@/$OPT_LANIP}"
+          template="${template//@ROOTSIZE@/$OPT_SIZE}"
+          template="${template//@DOCKER@/$OPT_DOCKER}"
+          template="${template//@DATE@/$(date -u +%Y-%m-%d)}"
+          printf '%s\n' "$template" > /tmp/release-notes.md
+
+          if grep -qE '@[A-Z_]+@' /tmp/release-notes.md; then
+            echo "::error::Release 说明里仍有未替换的占位符："
+            grep -oE '@[A-Z_]+@' /tmp/release-notes.md | sort -u
+            exit 1
+          fi
+
+          echo "=== Release 说明预览 ==="
+          head -30 /tmp/release-notes.md
+
+      - name: 创建或更新 Release
+        if: ${{ github.event_name == 'push' || inputs.create_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -e
+          # rockchip 目标**为每个启用的文件系统类型各出一个**镜像，
+          # 所以是 2 个（squashfs + ext4），不是一个。
+          ASSETS=$(ls -1 \
+            bin/targets/rockchip/armv8/*hinlink_ht2-squashfs-sysupgrade.img.gz \
+            bin/targets/rockchip/armv8/*hinlink_ht2-ext4-sysupgrade.img.gz \
+            bin/targets/rockchip/armv8/sha256sums)
+
+          # 发布前兜底：确认恰好是 2 个镜像 + 1 个校验和。
+          # 子目标下混进别的板子、或顶层 fs-type 被改过时，会在这一步暴露 ——
+          # 该修的是配置，而不是把一份与说明不符的附件列表发出去。
+          IMG_COUNT=$(printf '%s\n' $ASSETS | grep -c '\.img\.gz$' || true)
+          if [ "$IMG_COUNT" -ne 2 ]; then
+            echo "::error::期望 2 个镜像（squashfs + ext4），实际找到 $IMG_COUNT 个："
+            printf '%s\n' $ASSETS
+            exit 1
+          fi
+          echo "将发布的附件："
+          printf '  %s\n' $ASSETS
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，同步附件"
+            gh release upload "$TAG" $ASSETS --clobber
+            gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+              [ -n "$name" ] || continue
+              if printf '%s\n' $ASSETS | grep -qxF "bin/targets/rockchip/armv8/$name"; then
+                echo "  保留 $name"
+              else
+                echo "  删除过期附件 $name"
+                gh release delete-asset "$TAG" "$name" --yes || true
+              fi
+            done
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$TAG" \
+              --title "FanchmWrt × iStoreOS 融合固件 HT2 $TAG" \
+              --notes-file /tmp/release-notes.md \
+              $ASSETS
+          fi
+          echo "完成：$(gh release view "$TAG" --json url --jq .url)"

@@ -2,15 +2,43 @@
 #
 # 从构建产物核验合并结果。
 #
-# 直接读 bin/targets/x86/64/ 下的 *.manifest（包清单）与 *rootfs.tar.gz（文件内容），
-# 不依赖真机。用法：
+# 直接读产物目录下的 *.manifest（包清单）与 rootfs（文件内容），不依赖真机。
+#
+# 用法：
 #
 #   ./scripts/verify-merged-firmware.sh
+#       # 默认核验 x86_64
+#
+#   FANCHMWRT_TARGET=rockchip-armv8 ./scripts/verify-merged-firmware.sh
+#       # 核验 HINLINK HT2（Rockchip RK3528）
+#
+# 两个目标的**包集与文件清单是同一套**（这是合并版的全部意义：目标不改特性、
+# 只改设备层），所以下面绝大部分断言两边共用。真正分叉的只有两处：
+#
+#   1. 产物形态 —— x86 是 4 个 combined 镜像，rockchip 是 1 个 sysupgrade.img.gz；
+#   2. rootfs 的来源 —— x86 有 rootfs.tar.gz（退路是 squashfs-rootfs.img.gz），
+#      rockchip 的 rootfs 拼在 sysupgrade 镜像里，要按分区表取出来。
+#
+# 除此之外多出一段只在 rockchip 上跑的「设备层」核验：无线驱动与固件。
+# 少了它们的现象是「网卡根本不出现、也不报错」，属于最难查的一类，必须查。
 #
 set -u
 
 TOPDIR="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$TOPDIR/bin/targets/x86/64"
+
+FANCHMWRT_TARGET="${FANCHMWRT_TARGET:-x86_64}"
+case "$FANCHMWRT_TARGET" in
+	x86_64)
+		OUT="$TOPDIR/bin/targets/x86/64"
+		;;
+	rockchip-armv8)
+		OUT="$TOPDIR/bin/targets/rockchip/armv8"
+		;;
+	*)
+		echo "未知目标：'$FANCHMWRT_TARGET'（只支持 x86_64 / rockchip-armv8）" >&2
+		exit 1
+		;;
+esac
 
 PASS=0
 FAIL=0
@@ -83,6 +111,18 @@ if [ "$DOCKER_ON" = "1" ]; then
 	MUST_HAVE_PKGS="$MUST_HAVE_PKGS $DOCKER_PKGS"
 fi
 
+# HT2 的设备层：两套无线驱动 + 两套固件。
+#
+# 为什么两套都查：HT2 至少有两个批次（Broadcom AP6275S / AICSemi AIC8800），
+# 设备树对两者是同一套接线，区别只在驱动与固件。少装任何一套，对应批次的
+# 无线就上不来 —— 而现象是**网卡根本不出现、dmesg 里也没有报错**，
+# 属于最难查的一类。所以宁可在这里多断言四项。
+if [ "$FANCHMWRT_TARGET" = "rockchip-armv8" ]; then
+	MUST_HAVE_PKGS="$MUST_HAVE_PKGS \
+		kmod-brcmfmac brcmfmac-firmware-43752-sdio brcmfmac-nvram-43752-sdio \
+		kmod-aic8800-sdio aic8800-sdio-firmware"
+fi
+
 for p in $MUST_HAVE_PKGS; do
 	check_pkg "$p"
 done
@@ -143,15 +183,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 文件级核验需要一个「能解开的 rootfs」。优先用 rootfs.tar.gz；
-# 本项目为了只出 4 个镜像把 TARGZ 关掉了（连带没有 rootfs.tar.gz），
-# 这时退回到 squashfs-rootfs.img.gz —— 它由 x86 的 IMAGES-y 无条件产出，
-# 而且解出来的文件清单与 rootfs.tar.gz 逐一对得上（已实测 2760/2760 一致）。
+# 文件级核验需要一个「能解开的 rootfs」。两个目标的来源不一样：
+#
+#   x86_64          优先 rootfs.tar.gz。本项目为了只出 4 个镜像把 TARGZ 关掉了
+#                   （连带没有 rootfs.tar.gz），这时退回到 squashfs-rootfs.img.gz
+#                   —— 它由 x86 的 IMAGES-y 无条件产出，解出来的文件清单与
+#                   rootfs.tar.gz 逐一对得上（已实测 2760/2760 一致）。
+#
+#   rockchip-armv8  只有一个 sysupgrade.img.gz，rootfs 被拼在它**里面**
+#                   （MBR 的第二个分区）。用 scripts/extract-rockchip-rootfs.py
+#                   按分区表取出来 —— 不碰 loop 设备，所以不需要 root。
+#
+# 两条路最后都得到一份 squashfs，交给同一段 unsquashfs 逻辑处理。
 if [ -z "$ROOTFS" ]; then
-	SQUASHFS_ROOTFS="$(ls -1 "$OUT"/*-squashfs-rootfs.img.gz 2>/dev/null | head -1)"
-	if [ -n "$SQUASHFS_ROOTFS" ]; then
-		ROOTFS="$SQUASHFS_ROOTFS"
-		ROOTFS_KIND="squashfs"
+	if [ "$FANCHMWRT_TARGET" = "rockchip-armv8" ]; then
+		# 优先取 squashfs 那个：scripts/extract-rockchip-rootfs.py 按
+		# squashfs 超级块的 bytes_used 截断，只认这个类型。
+		IMG="$(ls -1 "$OUT"/*hinlink_ht2-squashfs-sysupgrade.img.gz 2>/dev/null | head -1)"
+		[ -n "$IMG" ] || IMG="$(ls -1 "$OUT"/*sysupgrade.img.gz 2>/dev/null | head -1)"
+		if [ -n "$IMG" ]; then
+			ROOTFS="$IMG"
+			ROOTFS_KIND="rockchip-img"
+		fi
+	else
+		SQUASHFS_ROOTFS="$(ls -1 "$OUT"/*-squashfs-rootfs.img.gz 2>/dev/null | head -1)"
+		if [ -n "$SQUASHFS_ROOTFS" ]; then
+			ROOTFS="$SQUASHFS_ROOTFS"
+			ROOTFS_KIND="squashfs"
+		fi
 	fi
 fi
 
@@ -162,7 +221,25 @@ else
 	WORK="$(mktemp -d)"
 	trap 'rm -rf "$WORK"' EXIT
 
-	if [ "${ROOTFS_KIND:-tar}" = "squashfs" ]; then
+	if [ "${ROOTFS_KIND:-tar}" = "rockchip-img" ]; then
+		head_ "从 sysupgrade 镜像里取出 rootfs 分区做文件级核验"
+		FS_TYPE="$(python3 "$TOPDIR/scripts/extract-rockchip-rootfs.py" "$ROOTFS" "$WORK/rootfs.raw")" \
+			|| { echo "从 $ROOTFS 取出 rootfs 分区失败" >&2; exit 1; }
+		if [ "$FS_TYPE" != "squashfs" ]; then
+			echo "rootfs 分区不是 squashfs（识别为 '$FS_TYPE'）" >&2
+			echo "本脚本目前只认 squashfs；若上游改成别的文件系统，这里需要同步更新。" >&2
+			exit 1
+		fi
+		# extract-rockchip-rootfs.py 已经按超级块的 bytes_used 截断过，
+		# 所以这里不会遇到「squashfs 后面跟着补零」那种情况。
+		unsquashfs -q -d "$WORK/x" "$WORK/rootfs.raw" >/dev/null 2>&1
+		R="$WORK/x"
+		if [ ! -e "$R/bin/busybox" ] || [ ! -e "$R/etc/openwrt_release" ]; then
+			echo "从 sysupgrade 镜像里取出的 rootfs 不完整（缺 busybox 或 openwrt_release）" >&2
+			exit 1
+		fi
+		rm -f "$WORK/rootfs.raw"
+	elif [ "${ROOTFS_KIND:-tar}" = "squashfs" ]; then
 		head_ "从 squashfs-rootfs 镜像解出 rootfs 做文件级核验"
 		gunzip -c "$ROOTFS" > "$WORK/rootfs.squashfs" 2>/dev/null \
 			|| { echo "解压 $ROOTFS 失败" >&2; exit 1; }
@@ -332,6 +409,56 @@ else
 		fi
 	else
 		skip "本次构建未指定管理地址，按预期没有 25_lan_ip"
+	fi
+
+	if [ "$FANCHMWRT_TARGET" = "rockchip-armv8" ]; then
+	head_ "设备层：无线驱动与固件（HT2）"
+	# Broadcom AP6275S（BCM43752）那一批
+	f /lib/firmware/brcm/brcmfmac43752-sdio.bin          "BCM43752 SDIO 固件"
+	f /lib/firmware/brcm/brcmfmac43752-sdio.clm_blob     "BCM43752 监管域数据（clm_blob）"
+	f /lib/firmware/brcm/brcmfmac43752-sdio.txt          "BCM43752 NVRAM（AP6275S 参考板）"
+	# AIC8800 那一批。固件按芯片型号分目录，装的是整个目录。
+	if [ -d "$R/lib/firmware/aic8800/sdio" ]; then
+		ok "AIC8800 SDIO 固件目录  (/lib/firmware/aic8800/sdio)"
+	else
+		bad "AIC8800 SDIO 固件目录缺失  (/lib/firmware/aic8800/sdio)"
+	fi
+	if [ -e "$R/lib/firmware/aic8800/sdio/fmacfw_8800d80_u02.bin" ] \
+	   || [ -e "$R/lib/firmware/aic8800/sdio/fmacfw.bin" ]; then
+		ok "AIC8800 固件文件在位"
+	else
+		bad "AIC8800 固件目录是空的（既没有 fmacfw_8800d80_u02.bin 也没有 fmacfw.bin）"
+	fi
+
+	head_ "设备层：设备树与引导"
+	# 设备树在 kernel.img（FIT）里面，不单独放在 boot 分区 ——
+	# 所以核验的是「编译产物里确实有这颗 SoC 的这个 dtb」。
+	DTB="$(ls -1 "$TOPDIR"/build_dir/target-aarch64_*/linux-*/linux-*/arch/arm64/boot/dts/rockchip/rk3528-hinlink-ht2.dtb 2>/dev/null | head -1)"
+	if [ -n "$DTB" ]; then
+		ok "HT2 设备树已编译  (${DTB#"$TOPDIR"/})"
+	else
+		bad "没找到 rk3528-hinlink-ht2.dtb —— 设备树补丁没打上，或者 CONFIG_TARGET_..._DEVICE_hinlink_ht2 没选中"
+	fi
+
+	# sysupgrade 镜像必须存在，且开头要有 u-boot（idbloader + u-boot 由
+	# pine64-img 直接 dd 进前 32768 扇区）。没有它刷不进 eMMC。
+	# rockchip 目标**为每个启用的文件系统类型各出一个**镜像，所以是两个。
+	# 这一条是实测出来的：只按「一个镜像」写的话，`ls | head -1` 只会拿到
+	# 其中一个（ext4，字典序在前），另一个静默漏掉。
+	for fs in squashfs ext4; do
+		SYSIMG="$(ls -1 "$OUT"/*hinlink_ht2-${fs}-sysupgrade.img.gz 2>/dev/null | head -1)"
+		if [ -n "$SYSIMG" ]; then
+			ok "${fs} sysupgrade 镜像  ($(basename "$SYSIMG"), $(du -h "$SYSIMG" | cut -f1))"
+		else
+			bad "缺少 HT2 的 ${fs} sysupgrade 镜像（*hinlink_ht2-${fs}-sysupgrade.img.gz）"
+		fi
+	done
+
+	if [ -f "$TOPDIR/staging_dir/target-aarch64_generic_musl/image/hinlink-ht2-rk3528-u-boot-rockchip.bin" ]; then
+		ok "U-Boot 产物存在（hinlink-ht2-rk3528-u-boot-rockchip.bin）"
+	else
+		bad "没找到 hinlink-ht2-rk3528-u-boot-rockchip.bin —— U-Boot 的 defconfig 没编出来"
+	fi
 	fi
 
 	head_ "运行时健全性"

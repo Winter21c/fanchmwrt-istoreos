@@ -24,7 +24,16 @@ JOBS="${1:-$(nproc)}"
 # 放弃该镜像，交给 download.pl 换下一个；全都慢则快速失败报错，而不是挂几小时。
 export CURL_OPTIONS="${CURL_OPTIONS:---speed-limit 51200 --speed-time 60}"
 
+# 目标标识：apply-build-options.sh 与 verify-merged-firmware.sh 都读它，
+# 用来决定「哪些与产物形态相关的开关该动」。
+#
+# 它还会被写进 .build-options，参与「构建参数是否变化」的比较 ——
+# 这一点很关键：从 HT2 切回 x86 时不作废 tmp/ 的 Kconfig 元数据，
+# 会复用到另一个架构的 DEFAULT_PACKAGES。详见 apply-build-options.sh 第 5 节。
+export FANCHMWRT_TARGET="x86_64"
+
 echo "==> 合并树 : $TOPDIR"
+echo "==> 目标   : x86_64"
 echo "==> 并发   : $JOBS"
 
 # --- 1. feeds ---------------------------------------------------------------
@@ -62,6 +71,26 @@ PART_SIZE="$(sed -n 's/^FANCHMWRT_ROOTFS_PARTSIZE=//p' .build-options 2>/dev/nul
 # TARGZ 显式关掉：它同时控制 -targz-* 三个镜像和 rootfs.tar.gz，
 # 而本项目只出 squashfs / ext4 各两种（efi 与非 efi）共 4 个镜像。
 # 见 include/image.mk 的 fs-types-$(CONFIG_TARGET_ROOTFS_TARGZ)。
+#
+# ---------------------------------------------------------------------------
+# 为什么不能只判「.config 在不在」
+# ---------------------------------------------------------------------------
+# 这个脚本与 build-merged-ht2.sh **共用同一棵源码树**，也就共用同一个 .config。
+# 只判存在的话，上一次编过 HT2 留下的 rockchip 配置会被原样复用 —— 这个脚本
+# 会拿着 aarch64 的配置编下去，最后去 bin/targets/x86/64/ 找产物，什么也找不到。
+#
+# apply-build-options.sh 其实已经挡住了这条路（FANCHMWRT_TARGET 参与「参数是否
+# 变化」的比较），但那是隔了一层、依赖 .build-options 与实际 .config 同步的保护。
+# 这里直接看 .config 本身的目标符号，两者互不替代。
+#
+# 目标不对时要连 .config 一起删掉再重建：defconfig 只补缺失的符号、不覆盖已有值，
+# 旧目标那批 "# ... is not set" 会留下来，混出一份四不像的配置。
+if [ -f .config ] && ! grep -q '^CONFIG_TARGET_x86_64=y$' .config; then
+	echo "==> 现有 .config 不是 x86_64 目标（上次编的多半是 HT2），作废重建"
+	cp .config .config.old
+	rm -f .config
+fi
+
 if [ ! -f .config ]; then
 	echo "==> 生成 .config"
 	cat > .config <<EOF
